@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <g fill="currentColor">
+    <!-- Monitor frame -->
+    <rect x="1" y="2" width="14" height="10" rx="1" ry="1" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <!-- Screen -->
+    <rect x="2.5" y="3.5" width="11" height="7" rx="0.5" ry="0.5"/>
+    <!-- Stand -->
+    <rect x="6.5" y="12" width="3" height="2.5"/>
+    <!-- Base -->
+    <rect x="4" y="14" width="8" height="1" rx="0.5" ry="0.5"/>
+  </g>
+</svg>

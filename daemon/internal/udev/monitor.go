@@ -1,0 +1,209 @@
+// Package udev provides hot-plug detection for Apple Studio Displays via netlink/udev events.
+package udev
+
+import (
+	"fmt"
+	"strings"
+	"sync"
+
+	"github.com/pilebones/go-udev/netlink"
+	"github.com/rs/zerolog/log"
+)
+
+const (
+	// AppleVendorID is the USB vendor ID for Apple devices (udev format, no leading zero).
+	AppleVendorID = "5ac"
+
+	// StudioDisplayProductID is the USB product ID for Apple Studio Display.
+	StudioDisplayProductID = "1114"
+)
+
+// EventType represents the type of device event.
+type EventType int
+
+const (
+	// EventAdd indicates a device was connected.
+	EventAdd EventType = iota
+	// EventRemove indicates a device was disconnected.
+	EventRemove
+)
+
+// Event represents a device hot-plug event.
+type Event struct {
+	Type EventType
+}
+
+// EventHandler is called when a device event occurs.
+type EventHandler func(event Event)
+
+// Monitor watches for Apple Studio Display connect/disconnect events.
+type Monitor struct {
+	conn    *netlink.UEventConn
+	handler EventHandler
+	quit    chan struct{}
+	stopped bool
+	mu      sync.Mutex
+}
+
+// NewMonitor creates a new udev monitor with the given event handler.
+func NewMonitor(handler EventHandler) *Monitor {
+	return &Monitor{
+		handler: handler,
+	}
+}
+
+// Start begins monitoring for device events.
+// This method is non-blocking; events are processed in a background goroutine.
+func (m *Monitor) Start() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.conn != nil {
+		return fmt.Errorf("monitor already started")
+	}
+
+	m.conn = &netlink.UEventConn{}
+	if err := m.conn.Connect(netlink.UdevEvent); err != nil {
+		m.conn = nil
+		return fmt.Errorf("failed to connect to netlink: %w", err)
+	}
+
+	queue := make(chan netlink.UEvent)
+	errs := make(chan error)
+
+	// Create matcher for Apple Studio Display USB events
+	matcher := m.createMatcher()
+
+	m.quit = m.conn.Monitor(queue, errs, matcher)
+	m.stopped = false
+
+	go m.processEvents(queue, errs)
+
+	log.Info().Msg("udev monitor started")
+	return nil
+}
+
+// Stop stops the monitor and releases resources.
+func (m *Monitor) Stop() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.conn == nil || m.stopped {
+		return nil
+	}
+
+	m.stopped = true
+
+	// Signal the monitor goroutine to stop
+	select {
+	case m.quit <- struct{}{}:
+	default:
+	}
+
+	if err := m.conn.Close(); err != nil {
+		return fmt.Errorf("failed to close netlink connection: %w", err)
+	}
+
+	m.conn = nil
+	log.Info().Msg("udev monitor stopped")
+	return nil
+}
+
+// createMatcher creates a matcher for Apple Studio Display events.
+func (m *Monitor) createMatcher() *netlink.RuleDefinitions {
+	rules := &netlink.RuleDefinitions{}
+
+	// Match add/remove actions for USB devices with Apple vendor ID and Studio Display product ID.
+	// The PRODUCT env var format is "vendorId/productId/bcdDevice" (e.g., "5ac/1114/157").
+	// We use anchored regex to prevent false positives (e.g., "5ac/11149" should not match).
+	addAction := "add"
+	removeAction := "remove"
+
+	// Pattern matches exactly: vendorId/productId/anything (anchored)
+	productPattern := fmt.Sprintf("^%s/%s/[^/]+$", AppleVendorID, StudioDisplayProductID)
+
+	// Match USB subsystem events for Apple Studio Display
+	rules.AddRule(netlink.RuleDefinition{
+		Action: &addAction,
+		Env: map[string]string{
+			"SUBSYSTEM": "^usb$",
+			"PRODUCT":   productPattern,
+		},
+	})
+
+	rules.AddRule(netlink.RuleDefinition{
+		Action: &removeAction,
+		Env: map[string]string{
+			"SUBSYSTEM": "^usb$",
+			"PRODUCT":   productPattern,
+		},
+	})
+
+	return rules
+}
+
+// processEvents handles incoming udev events.
+func (m *Monitor) processEvents(queue chan netlink.UEvent, errs chan error) {
+	for {
+		select {
+		case event, ok := <-queue:
+			if !ok {
+				return
+			}
+			m.handleEvent(event)
+		case err, ok := <-errs:
+			if !ok {
+				return
+			}
+			// Check if we're stopping
+			m.mu.Lock()
+			stopped := m.stopped
+			m.mu.Unlock()
+			if stopped {
+				return
+			}
+			log.Error().Err(err).Msg("udev monitor error")
+		}
+	}
+}
+
+// handleEvent processes a single udev event.
+func (m *Monitor) handleEvent(uevent netlink.UEvent) {
+	// Filter for usb_device type only (not usb_interface)
+	devtype := uevent.Env["DEVTYPE"]
+	if devtype != "usb_device" {
+		return
+	}
+
+	log.Debug().
+		Str("action", string(uevent.Action)).
+		Str("devpath", uevent.KObj).
+		Str("product", uevent.Env["PRODUCT"]).
+		Msg("USB device event")
+
+	var eventType EventType
+	switch uevent.Action {
+	case netlink.ADD:
+		eventType = EventAdd
+		log.Info().Str("product", uevent.Env["PRODUCT"]).Msg("Apple Studio Display connected")
+	case netlink.REMOVE:
+		eventType = EventRemove
+		log.Info().Str("product", uevent.Env["PRODUCT"]).Msg("Apple Studio Display disconnected")
+	default:
+		return
+	}
+
+	if m.handler != nil {
+		m.handler(Event{Type: eventType})
+	}
+}
+
+// IsStudioDisplayProduct checks if a PRODUCT string matches Apple Studio Display.
+func IsStudioDisplayProduct(product string) bool {
+	// PRODUCT format: "vendorId/productId/bcdDevice" (e.g., "5ac/1114/157")
+	parts := strings.Split(product, "/")
+	if len(parts) < 2 {
+		return false
+	}
+	return strings.EqualFold(parts[0], AppleVendorID) && parts[1] == StudioDisplayProductID
+}

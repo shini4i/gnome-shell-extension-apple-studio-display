@@ -1,0 +1,44 @@
+# Go binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+asd-brightness-daemon
+
+# Test binary
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.html
+
+# Go workspace file
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Nix
+result
+result-*
+
+# Node modules (extension development)
+node_modules/
+
+# Build artifacts
+dist/
+*.zip
+
+# Local development
+.direnv/
+.claude/
+.serena/

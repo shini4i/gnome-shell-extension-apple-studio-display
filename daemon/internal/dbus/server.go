@@ -1,0 +1,352 @@
+// Package dbus provides the D-Bus service implementation for Apple Studio Display brightness control.
+package dbus
+
+import (
+	"errors"
+	"fmt"
+	"sync"
+
+	"github.com/godbus/dbus/v5"
+	"github.com/godbus/dbus/v5/introspect"
+	"github.com/rs/zerolog/log"
+	"github.com/shini4i/asd-brightness-daemon/internal/hid"
+)
+
+// ErrEmptySerial is returned when an empty serial number is provided.
+var ErrEmptySerial = errors.New("serial cannot be empty")
+
+const (
+	// ServiceName is the D-Bus service name.
+	ServiceName = "io.github.shini4i.AsdBrightness"
+
+	// ObjectPath is the D-Bus object path.
+	ObjectPath = "/io/github/shini4i/AsdBrightness"
+
+	// InterfaceName is the D-Bus interface name.
+	InterfaceName = "io.github.shini4i.AsdBrightness"
+)
+
+// IntrospectXML is the D-Bus introspection XML for the service.
+const IntrospectXML = `
+<node name="` + ObjectPath + `">
+  <interface name="` + InterfaceName + `">
+    <method name="ListDisplays">
+      <arg name="displays" type="a(ss)" direction="out"/>
+    </method>
+    <method name="GetBrightness">
+      <arg name="serial" type="s" direction="in"/>
+      <arg name="brightness" type="u" direction="out"/>
+    </method>
+    <method name="SetBrightness">
+      <arg name="serial" type="s" direction="in"/>
+      <arg name="brightness" type="u" direction="in"/>
+    </method>
+    <method name="IncreaseBrightness">
+      <arg name="serial" type="s" direction="in"/>
+      <arg name="step" type="u" direction="in"/>
+    </method>
+    <method name="DecreaseBrightness">
+      <arg name="serial" type="s" direction="in"/>
+      <arg name="step" type="u" direction="in"/>
+    </method>
+    <method name="SetAllBrightness">
+      <arg name="brightness" type="u" direction="in"/>
+    </method>
+    <signal name="DisplayAdded">
+      <arg name="serial" type="s"/>
+      <arg name="productName" type="s"/>
+    </signal>
+    <signal name="DisplayRemoved">
+      <arg name="serial" type="s"/>
+    </signal>
+    <signal name="BrightnessChanged">
+      <arg name="serial" type="s"/>
+      <arg name="brightness" type="u"/>
+    </signal>
+  </interface>
+  ` + introspect.IntrospectDataString + `
+</node>
+`
+
+// DisplayManager is an interface for managing displays.
+// This allows for mocking in tests.
+type DisplayManager interface {
+	// ListDisplays returns information about all connected displays.
+	ListDisplays() []hid.DeviceInfo
+
+	// GetDisplay returns a display by serial number.
+	GetDisplay(serial string) (*hid.Display, error)
+
+	// RefreshDisplays re-enumerates connected displays.
+	RefreshDisplays() error
+}
+
+// Server implements the D-Bus service for brightness control.
+//
+// Thread safety:
+//   - The underlying Manager and Display types are individually thread-safe.
+//   - The connMu mutex protects the D-Bus connection field for signal emission.
+//   - Note: IncreaseBrightness and DecreaseBrightness perform non-atomic
+//     read-modify-write operations. Concurrent calls may result in missed
+//     increments. This is acceptable for typical keyboard shortcut usage.
+type Server struct {
+	conn   *dbus.Conn
+	connMu sync.RWMutex // Protects conn field only
+	manager DisplayManager
+}
+
+// NewServer creates a new D-Bus server with the given display manager.
+func NewServer(manager DisplayManager) *Server {
+	return &Server{
+		manager: manager,
+	}
+}
+
+// Start connects to the session bus and exports the service.
+func (s *Server) Start() error {
+	var err error
+	s.conn, err = dbus.ConnectSessionBus()
+	if err != nil {
+		return fmt.Errorf("failed to connect to session bus: %w", err)
+	}
+
+	// Export the server object
+	err = s.conn.Export(s, ObjectPath, InterfaceName)
+	if err != nil {
+		return fmt.Errorf("failed to export server: %w", err)
+	}
+
+	// Export introspectable interface
+	err = s.conn.Export(introspect.Introspectable(IntrospectXML), ObjectPath, "org.freedesktop.DBus.Introspectable")
+	if err != nil {
+		return fmt.Errorf("failed to export introspectable: %w", err)
+	}
+
+	// Request the service name
+	reply, err := s.conn.RequestName(ServiceName, dbus.NameFlagDoNotQueue)
+	if err != nil {
+		return fmt.Errorf("failed to request name: %w", err)
+	}
+	if reply != dbus.RequestNameReplyPrimaryOwner {
+		return fmt.Errorf("name %s already taken", ServiceName)
+	}
+
+	log.Info().Str("service", ServiceName).Msg("D-Bus service started")
+	return nil
+}
+
+// Stop disconnects from the session bus.
+func (s *Server) Stop() error {
+	if s.conn != nil {
+		return s.conn.Close()
+	}
+	return nil
+}
+
+// ListDisplays returns a list of all connected displays.
+// Returns an array of tuples: [(serial, productName), ...]
+func (s *Server) ListDisplays() ([][2]string, *dbus.Error) {
+	displays := s.manager.ListDisplays()
+	result := make([][2]string, len(displays))
+	for i, d := range displays {
+		result[i] = [2]string{d.Serial, d.Product}
+	}
+
+	log.Debug().Int("count", len(result)).Msg("Listed displays")
+	return result, nil
+}
+
+// GetBrightness returns the brightness of a display as a percentage (0-100).
+func (s *Server) GetBrightness(serial string) (uint32, *dbus.Error) {
+	if serial == "" {
+		return 0, dbus.MakeFailedError(ErrEmptySerial)
+	}
+
+	display, err := s.manager.GetDisplay(serial)
+	if err != nil {
+		log.Error().Err(err).Str("serial", serial).Msg("Failed to get display")
+		return 0, dbus.MakeFailedError(err)
+	}
+
+	brightness, err := display.GetBrightness()
+	if err != nil {
+		log.Error().Err(err).Str("serial", serial).Msg("Failed to get brightness")
+		return 0, dbus.MakeFailedError(err)
+	}
+
+	log.Debug().Str("serial", serial).Uint8("brightness", brightness).Msg("Got brightness")
+	return uint32(brightness), nil
+}
+
+// SetBrightness sets the brightness of a display to a percentage (0-100).
+func (s *Server) SetBrightness(serial string, brightness uint32) *dbus.Error {
+	if serial == "" {
+		return dbus.MakeFailedError(ErrEmptySerial)
+	}
+
+	display, err := s.manager.GetDisplay(serial)
+	if err != nil {
+		log.Error().Err(err).Str("serial", serial).Msg("Failed to get display")
+		return dbus.MakeFailedError(err)
+	}
+
+	if brightness > 100 {
+		brightness = 100
+	}
+
+	err = display.SetBrightness(uint8(brightness))
+	if err != nil {
+		log.Error().Err(err).Str("serial", serial).Msg("Failed to set brightness")
+		return dbus.MakeFailedError(err)
+	}
+
+	log.Debug().Str("serial", serial).Uint32("brightness", brightness).Msg("Set brightness")
+
+	// Emit signal
+	s.emitBrightnessChanged(serial, brightness)
+
+	return nil
+}
+
+// IncreaseBrightness increases the brightness of a display by a step.
+func (s *Server) IncreaseBrightness(serial string, step uint32) *dbus.Error {
+	if serial == "" {
+		return dbus.MakeFailedError(ErrEmptySerial)
+	}
+
+	display, err := s.manager.GetDisplay(serial)
+	if err != nil {
+		return dbus.MakeFailedError(err)
+	}
+
+	current, err := display.GetBrightness()
+	if err != nil {
+		return dbus.MakeFailedError(err)
+	}
+
+	newBrightness := uint32(current) + step
+	if newBrightness > 100 {
+		newBrightness = 100
+	}
+
+	err = display.SetBrightness(uint8(newBrightness))
+	if err != nil {
+		return dbus.MakeFailedError(err)
+	}
+
+	log.Debug().Str("serial", serial).Uint32("step", step).Uint32("new", newBrightness).Msg("Increased brightness")
+	s.emitBrightnessChanged(serial, newBrightness)
+
+	return nil
+}
+
+// DecreaseBrightness decreases the brightness of a display by a step.
+func (s *Server) DecreaseBrightness(serial string, step uint32) *dbus.Error {
+	if serial == "" {
+		return dbus.MakeFailedError(ErrEmptySerial)
+	}
+
+	display, err := s.manager.GetDisplay(serial)
+	if err != nil {
+		return dbus.MakeFailedError(err)
+	}
+
+	current, err := display.GetBrightness()
+	if err != nil {
+		return dbus.MakeFailedError(err)
+	}
+
+	var newBrightness uint32
+	if uint32(current) > step {
+		newBrightness = uint32(current) - step
+	} else {
+		newBrightness = 0
+	}
+
+	err = display.SetBrightness(uint8(newBrightness))
+	if err != nil {
+		return dbus.MakeFailedError(err)
+	}
+
+	log.Debug().Str("serial", serial).Uint32("step", step).Uint32("new", newBrightness).Msg("Decreased brightness")
+	s.emitBrightnessChanged(serial, newBrightness)
+
+	return nil
+}
+
+// SetAllBrightness sets the brightness of all displays to a percentage (0-100).
+func (s *Server) SetAllBrightness(brightness uint32) *dbus.Error {
+	if brightness > 100 {
+		brightness = 100
+	}
+
+	displays := s.manager.ListDisplays()
+	for _, info := range displays {
+		display, err := s.manager.GetDisplay(info.Serial)
+		if err != nil {
+			log.Error().Err(err).Str("serial", info.Serial).Msg("Failed to get display")
+			continue
+		}
+
+		err = display.SetBrightness(uint8(brightness))
+		if err != nil {
+			log.Error().Err(err).Str("serial", info.Serial).Msg("Failed to set brightness")
+			continue
+		}
+
+		s.emitBrightnessChanged(info.Serial, brightness)
+	}
+
+	log.Debug().Uint32("brightness", brightness).Int("count", len(displays)).Msg("Set all brightness")
+	return nil
+}
+
+// emitBrightnessChanged emits the BrightnessChanged signal.
+func (s *Server) emitBrightnessChanged(serial string, brightness uint32) {
+	s.connMu.RLock()
+	conn := s.conn
+	s.connMu.RUnlock()
+
+	if conn == nil {
+		return
+	}
+
+	err := conn.Emit(ObjectPath, InterfaceName+".BrightnessChanged", serial, brightness)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to emit BrightnessChanged signal")
+	}
+}
+
+// EmitDisplayAdded emits the DisplayAdded signal.
+func (s *Server) EmitDisplayAdded(serial, productName string) {
+	s.connMu.RLock()
+	conn := s.conn
+	s.connMu.RUnlock()
+
+	if conn == nil {
+		return
+	}
+
+	err := conn.Emit(ObjectPath, InterfaceName+".DisplayAdded", serial, productName)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to emit DisplayAdded signal")
+	}
+	log.Info().Str("serial", serial).Str("product", productName).Msg("Display added")
+}
+
+// EmitDisplayRemoved emits the DisplayRemoved signal.
+func (s *Server) EmitDisplayRemoved(serial string) {
+	s.connMu.RLock()
+	conn := s.conn
+	s.connMu.RUnlock()
+
+	if conn == nil {
+		return
+	}
+
+	err := conn.Emit(ObjectPath, InterfaceName+".DisplayRemoved", serial)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to emit DisplayRemoved signal")
+	}
+	log.Info().Str("serial", serial).Msg("Display removed")
+}

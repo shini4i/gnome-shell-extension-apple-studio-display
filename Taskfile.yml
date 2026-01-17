@@ -1,0 +1,43 @@
+version: '3'
+
+vars:
+  DAEMON_DIR: daemon
+  BINARY_NAME: asd-brightness-daemon
+
+tasks:
+  default:
+    desc: Build and test
+    cmds:
+      - task: build
+      - task: test
+
+  build:
+    desc: Build the daemon binary
+    dir: "{{.DAEMON_DIR}}"
+    cmds:
+      - go build -o {{.BINARY_NAME}} ./cmd/asd-brightness-daemon
+
+  test:
+    desc: Run all tests
+    dir: "{{.DAEMON_DIR}}"
+    cmds:
+      - go test ./...
+
+  test-verbose:
+    desc: Run all tests with verbose output
+    dir: "{{.DAEMON_DIR}}"
+    cmds:
+      - go test -v ./...
+
+  run:
+    desc: Run the daemon (verbose mode)
+    dir: "{{.DAEMON_DIR}}"
+    deps: [build]
+    cmds:
+      - ./{{.BINARY_NAME}} -v
+
+  clean:
+    desc: Clean build artifacts
+    dir: "{{.DAEMON_DIR}}"
+    cmds:
+      - rm -f {{.BINARY_NAME}}

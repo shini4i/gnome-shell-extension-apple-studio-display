@@ -1,0 +1,8 @@
+{
+    "uuid": "asd-brightness@shini4i.github.io",
+    "name": "Apple Studio Display Brightness",
+    "description": "Control brightness of Apple Studio Display monitors from the Quick Settings panel",
+    "version": 1,
+    "shell-version": ["47", "48", "49"],
+    "url": "https://github.com/shini4i/gnome-shell-extension-apple-studio-display"
+}

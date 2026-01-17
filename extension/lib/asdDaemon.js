@@ -1,0 +1,349 @@
+/**
+ * D-Bus client wrapper for asd-brightness-daemon.
+ *
+ * Provides async methods to control Apple Studio Display brightness
+ * via the io.github.shini4i.AsdBrightness D-Bus service.
+ */
+
+import Gio from 'gi://Gio';
+
+const SERVICE_NAME = 'io.github.shini4i.AsdBrightness';
+const OBJECT_PATH = '/io/github/shini4i/AsdBrightness';
+const INTERFACE_NAME = 'io.github.shini4i.AsdBrightness';
+
+const AsdBrightnessInterface = `
+<node>
+  <interface name="${INTERFACE_NAME}">
+    <method name="ListDisplays">
+      <arg name="displays" type="a(ss)" direction="out"/>
+    </method>
+    <method name="GetBrightness">
+      <arg name="serial" type="s" direction="in"/>
+      <arg name="brightness" type="u" direction="out"/>
+    </method>
+    <method name="SetBrightness">
+      <arg name="serial" type="s" direction="in"/>
+      <arg name="brightness" type="u" direction="in"/>
+    </method>
+    <method name="IncreaseBrightness">
+      <arg name="serial" type="s" direction="in"/>
+      <arg name="step" type="u" direction="in"/>
+    </method>
+    <method name="DecreaseBrightness">
+      <arg name="serial" type="s" direction="in"/>
+      <arg name="step" type="u" direction="in"/>
+    </method>
+    <method name="SetAllBrightness">
+      <arg name="brightness" type="u" direction="in"/>
+    </method>
+    <signal name="DisplayAdded">
+      <arg name="serial" type="s"/>
+      <arg name="productName" type="s"/>
+    </signal>
+    <signal name="DisplayRemoved">
+      <arg name="serial" type="s"/>
+    </signal>
+    <signal name="BrightnessChanged">
+      <arg name="serial" type="s"/>
+      <arg name="brightness" type="u"/>
+    </signal>
+  </interface>
+</node>
+`;
+
+/**
+ * D-Bus client for asd-brightness-daemon.
+ *
+ * Manages connection to the brightness daemon and provides
+ * methods and signals for display brightness control.
+ */
+export class AsdDaemon {
+    constructor() {
+        this._proxy = null;
+        this._signalIds = [];
+        this._callbacks = {
+            displayAdded: [],
+            displayRemoved: [],
+            brightnessChanged: [],
+        };
+    }
+
+    /**
+     * Initializes the D-Bus proxy connection.
+     *
+     * @returns {Promise<boolean>} True if connection succeeded
+     */
+    async init() {
+        try {
+            const ProxyClass = Gio.DBusProxy.makeProxyWrapper(AsdBrightnessInterface);
+            this._proxy = await new Promise((resolve, reject) => {
+                new ProxyClass(
+                    Gio.DBus.session,
+                    SERVICE_NAME,
+                    OBJECT_PATH,
+                    (proxy, error) => {
+                        if (error) {
+                            reject(error);
+                        } else {
+                            resolve(proxy);
+                        }
+                    }
+                );
+            });
+
+            this._connectSignals();
+            return true;
+        } catch (e) {
+            console.error(`[AsdBrightness] Failed to connect to daemon: ${e.message}`);
+            return false;
+        }
+    }
+
+    /**
+     * Connects D-Bus signal handlers.
+     */
+    _connectSignals() {
+        if (!this._proxy) {
+            return;
+        }
+
+        const displayAddedId = this._proxy.connectSignal(
+            'DisplayAdded',
+            (_proxy, _sender, [serial, productName]) => {
+                this._callbacks.displayAdded.forEach(cb => cb(serial, productName));
+            }
+        );
+        this._signalIds.push(displayAddedId);
+
+        const displayRemovedId = this._proxy.connectSignal(
+            'DisplayRemoved',
+            (_proxy, _sender, [serial]) => {
+                this._callbacks.displayRemoved.forEach(cb => cb(serial));
+            }
+        );
+        this._signalIds.push(displayRemovedId);
+
+        const brightnessChangedId = this._proxy.connectSignal(
+            'BrightnessChanged',
+            (_proxy, _sender, [serial, brightness]) => {
+                this._callbacks.brightnessChanged.forEach(cb => cb(serial, brightness));
+            }
+        );
+        this._signalIds.push(brightnessChangedId);
+    }
+
+    /**
+     * Destroys the D-Bus connection and cleans up resources.
+     */
+    destroy() {
+        if (this._proxy) {
+            this._signalIds.forEach(id => this._proxy.disconnectSignal(id));
+            this._signalIds = [];
+            this._proxy = null;
+        }
+        this._callbacks = {
+            displayAdded: [],
+            displayRemoved: [],
+            brightnessChanged: [],
+        };
+    }
+
+    /**
+     * Registers a callback for DisplayAdded signals.
+     *
+     * @param {function(string, string): void} callback - Called with (serial, productName)
+     * @returns {function(): void} Function to unregister the callback
+     */
+    onDisplayAdded(callback) {
+        this._callbacks.displayAdded.push(callback);
+        return () => {
+            const idx = this._callbacks.displayAdded.indexOf(callback);
+            if (idx !== -1)
+                this._callbacks.displayAdded.splice(idx, 1);
+        };
+    }
+
+    /**
+     * Registers a callback for DisplayRemoved signals.
+     *
+     * @param {function(string): void} callback - Called with serial
+     * @returns {function(): void} Function to unregister the callback
+     */
+    onDisplayRemoved(callback) {
+        this._callbacks.displayRemoved.push(callback);
+        return () => {
+            const idx = this._callbacks.displayRemoved.indexOf(callback);
+            if (idx !== -1)
+                this._callbacks.displayRemoved.splice(idx, 1);
+        };
+    }
+
+    /**
+     * Registers a callback for BrightnessChanged signals.
+     *
+     * @param {function(string, number): void} callback - Called with (serial, brightness)
+     * @returns {function(): void} Function to unregister the callback
+     */
+    onBrightnessChanged(callback) {
+        this._callbacks.brightnessChanged.push(callback);
+        return () => {
+            const idx = this._callbacks.brightnessChanged.indexOf(callback);
+            if (idx !== -1)
+                this._callbacks.brightnessChanged.splice(idx, 1);
+        };
+    }
+
+    /**
+     * Lists all connected displays.
+     *
+     * @returns {Promise<Array<{serial: string, productName: string}>>} Array of display info
+     */
+    async listDisplays() {
+        if (!this._proxy) {
+            return [];
+        }
+
+        try {
+            const [displays] = await this._callMethod('ListDisplays');
+            return displays.map(([serial, productName]) => ({serial, productName}));
+        } catch (e) {
+            console.error(`[AsdBrightness] ListDisplays failed: ${e.message}`);
+            return [];
+        }
+    }
+
+    /**
+     * Gets the brightness of a specific display.
+     *
+     * @param {string} serial - Display serial number
+     * @returns {Promise<number|null>} Brightness percentage (0-100) or null on error
+     */
+    async getBrightness(serial) {
+        if (!this._proxy) {
+            return null;
+        }
+
+        try {
+            const [brightness] = await this._callMethod('GetBrightness', serial);
+            return brightness;
+        } catch (e) {
+            console.error(`[AsdBrightness] GetBrightness failed: ${e.message}`);
+            return null;
+        }
+    }
+
+    /**
+     * Sets the brightness of a specific display.
+     *
+     * @param {string} serial - Display serial number
+     * @param {number} brightness - Brightness percentage (0-100)
+     * @returns {Promise<boolean>} True if successful
+     */
+    async setBrightness(serial, brightness) {
+        if (!this._proxy) {
+            return false;
+        }
+
+        try {
+            await this._callMethod('SetBrightness', serial, brightness);
+            return true;
+        } catch (e) {
+            console.error(`[AsdBrightness] SetBrightness failed: ${e.message}`);
+            return false;
+        }
+    }
+
+    /**
+     * Increases brightness of a display by a step.
+     *
+     * @param {string} serial - Display serial number
+     * @param {number} step - Amount to increase (default: 5)
+     * @returns {Promise<boolean>} True if successful
+     */
+    async increaseBrightness(serial, step = 5) {
+        if (!this._proxy) {
+            return false;
+        }
+
+        try {
+            await this._callMethod('IncreaseBrightness', serial, step);
+            return true;
+        } catch (e) {
+            console.error(`[AsdBrightness] IncreaseBrightness failed: ${e.message}`);
+            return false;
+        }
+    }
+
+    /**
+     * Decreases brightness of a display by a step.
+     *
+     * @param {string} serial - Display serial number
+     * @param {number} step - Amount to decrease (default: 5)
+     * @returns {Promise<boolean>} True if successful
+     */
+    async decreaseBrightness(serial, step = 5) {
+        if (!this._proxy) {
+            return false;
+        }
+
+        try {
+            await this._callMethod('DecreaseBrightness', serial, step);
+            return true;
+        } catch (e) {
+            console.error(`[AsdBrightness] DecreaseBrightness failed: ${e.message}`);
+            return false;
+        }
+    }
+
+    /**
+     * Sets brightness of all connected displays.
+     *
+     * @param {number} brightness - Brightness percentage (0-100)
+     * @returns {Promise<boolean>} True if successful
+     */
+    async setAllBrightness(brightness) {
+        if (!this._proxy) {
+            return false;
+        }
+
+        try {
+            await this._callMethod('SetAllBrightness', brightness);
+            return true;
+        } catch (e) {
+            console.error(`[AsdBrightness] SetAllBrightness failed: ${e.message}`);
+            return false;
+        }
+    }
+
+    /**
+     * Checks if the daemon is available.
+     *
+     * @returns {boolean} True if connected to daemon
+     */
+    isAvailable() {
+        return this._proxy !== null;
+    }
+
+    /**
+     * Calls a D-Bus method with promise wrapper.
+     *
+     * @param {string} method - Method name
+     * @param {...*} args - Method arguments
+     * @returns {Promise<*>} Method result
+     */
+    _callMethod(method, ...args) {
+        return new Promise((resolve, reject) => {
+            if (!this._proxy) {
+                reject(new Error('D-Bus proxy is not available'));
+                return;
+            }
+            this._proxy[`${method}Remote`](...args, (result, error) => {
+                if (error) {
+                    reject(error);
+                } else {
+                    resolve(result);
+                }
+            });
+        });
+    }
+}

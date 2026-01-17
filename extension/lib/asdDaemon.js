@@ -3,6 +3,9 @@
  *
  * Provides async methods to control Apple Studio Display brightness
  * via the io.github.shini4i.AsdBrightness D-Bus service.
+ *
+ * Features automatic reconnection when the daemon restarts by watching
+ * for D-Bus name owner changes.
  */
 
 import Gio from 'gi://Gio';
@@ -56,24 +59,135 @@ const AsdBrightnessInterface = `
  *
  * Manages connection to the brightness daemon and provides
  * methods and signals for display brightness control.
+ * Automatically reconnects when the daemon restarts.
  */
 export class AsdDaemon {
     constructor() {
         this._proxy = null;
         this._signalIds = [];
+        this._nameWatcherId = 0;
+        this._isReconnecting = false;
         this._callbacks = {
             displayAdded: [],
             displayRemoved: [],
             brightnessChanged: [],
+            daemonAvailable: [],
+            daemonUnavailable: [],
         };
     }
 
     /**
-     * Initializes the D-Bus proxy connection.
+     * Initializes the D-Bus proxy connection and name watcher.
      *
      * @returns {Promise<boolean>} True if connection succeeded
      */
     async init() {
+        // Set up name watcher to detect daemon restarts
+        this._setupNameWatcher();
+
+        // Try initial connection
+        return await this._connect();
+    }
+
+    /**
+     * Sets up the D-Bus name watcher to detect daemon availability changes.
+     */
+    _setupNameWatcher() {
+        if (this._nameWatcherId !== 0) {
+            return;
+        }
+
+        this._nameWatcherId = Gio.bus_watch_name(
+            Gio.BusType.SESSION,
+            SERVICE_NAME,
+            Gio.BusNameWatcherFlags.NONE,
+            this._onDaemonAppeared.bind(this),
+            this._onDaemonVanished.bind(this)
+        );
+
+        console.log('[AsdBrightness] Name watcher set up for daemon');
+    }
+
+    /**
+     * Called when the daemon name appears on the bus.
+     */
+    async _onDaemonAppeared() {
+        console.log('[AsdBrightness] Daemon appeared on D-Bus');
+
+        // Guard against destroyed state
+        if (this._callbacks === null) {
+            return;
+        }
+
+        // If we already have a proxy, we need to reconnect to get fresh subscriptions
+        if (this._proxy !== null && !this._isReconnecting) {
+            console.log('[AsdBrightness] Reconnecting to daemon after restart');
+            await this._reconnect();
+        }
+
+        // Guard against destruction during await
+        if (this._callbacks === null) {
+            return;
+        }
+
+        // Notify listeners that daemon is available
+        this._callbacks.daemonAvailable.forEach(cb => cb());
+    }
+
+    /**
+     * Called when the daemon name vanishes from the bus.
+     */
+    _onDaemonVanished() {
+        console.log('[AsdBrightness] Daemon vanished from D-Bus');
+
+        // Guard against destroyed state
+        if (this._callbacks === null) {
+            return;
+        }
+
+        // Clear the stale proxy
+        this._disconnectSignals();
+        this._proxy = null;
+
+        // Notify listeners that daemon is unavailable
+        this._callbacks.daemonUnavailable.forEach(cb => cb());
+    }
+
+    /**
+     * Reconnects to the daemon after it restarts.
+     */
+    async _reconnect() {
+        if (this._isReconnecting) {
+            return;
+        }
+
+        this._isReconnecting = true;
+
+        // Clean up old connection
+        this._disconnectSignals();
+        this._proxy = null;
+
+        // Establish new connection
+        const connected = await this._connect();
+
+        // Guard against destruction during await
+        if (this._callbacks === null) {
+            return;
+        }
+
+        this._isReconnecting = false;
+
+        if (connected) {
+            console.log('[AsdBrightness] Successfully reconnected to daemon');
+        }
+    }
+
+    /**
+     * Establishes the D-Bus proxy connection.
+     *
+     * @returns {Promise<boolean>} True if connection succeeded
+     */
+    async _connect() {
         try {
             const ProxyClass = Gio.DBusProxy.makeProxyWrapper(AsdBrightnessInterface);
             this._proxy = await new Promise((resolve, reject) => {
@@ -133,19 +247,37 @@ export class AsdDaemon {
     }
 
     /**
+     * Disconnects D-Bus signal handlers.
+     */
+    _disconnectSignals() {
+        if (this._proxy && this._signalIds.length > 0) {
+            this._signalIds.forEach(id => this._proxy.disconnectSignal(id));
+        }
+        this._signalIds = [];
+    }
+
+    /**
      * Destroys the D-Bus connection and cleans up resources.
      */
     destroy() {
-        if (this._proxy) {
-            this._signalIds.forEach(id => this._proxy.disconnectSignal(id));
-            this._signalIds = [];
-            this._proxy = null;
+        // Unwatch the name
+        if (this._nameWatcherId !== 0) {
+            Gio.bus_unwatch_name(this._nameWatcherId);
+            this._nameWatcherId = 0;
         }
-        this._callbacks = {
-            displayAdded: [],
-            displayRemoved: [],
-            brightnessChanged: [],
-        };
+
+        // Disconnect signals and clean up proxy
+        this._disconnectSignals();
+        this._proxy = null;
+
+        // Clear callbacks and set to null to signal destruction
+        // (null check is used in async methods to detect destruction)
+        if (this._callbacks) {
+            Object.keys(this._callbacks).forEach(key => {
+                this._callbacks[key].length = 0;
+            });
+        }
+        this._callbacks = null;
     }
 
     /**
@@ -190,6 +322,38 @@ export class AsdDaemon {
             const idx = this._callbacks.brightnessChanged.indexOf(callback);
             if (idx !== -1)
                 this._callbacks.brightnessChanged.splice(idx, 1);
+        };
+    }
+
+    /**
+     * Registers a callback for when the daemon becomes available.
+     * This is called when the daemon starts or restarts.
+     *
+     * @param {function(): void} callback - Called when daemon is available
+     * @returns {function(): void} Function to unregister the callback
+     */
+    onDaemonAvailable(callback) {
+        this._callbacks.daemonAvailable.push(callback);
+        return () => {
+            const idx = this._callbacks.daemonAvailable.indexOf(callback);
+            if (idx !== -1)
+                this._callbacks.daemonAvailable.splice(idx, 1);
+        };
+    }
+
+    /**
+     * Registers a callback for when the daemon becomes unavailable.
+     * This is called when the daemon stops or crashes.
+     *
+     * @param {function(): void} callback - Called when daemon is unavailable
+     * @returns {function(): void} Function to unregister the callback
+     */
+    onDaemonUnavailable(callback) {
+        this._callbacks.daemonUnavailable.push(callback);
+        return () => {
+            const idx = this._callbacks.daemonUnavailable.indexOf(callback);
+            if (idx !== -1)
+                this._callbacks.daemonUnavailable.splice(idx, 1);
         };
     }
 

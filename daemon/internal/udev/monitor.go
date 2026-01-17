@@ -2,9 +2,11 @@
 package udev
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/pilebones/go-udev/netlink"
 	"github.com/rs/zerolog/log"
@@ -36,13 +38,18 @@ type Event struct {
 // EventHandler is called when a device event occurs.
 type EventHandler func(event Event)
 
+// RecoveryHandler is called when the monitor recovers from an error condition
+// (e.g., netlink buffer overflow) and needs to trigger a refresh.
+type RecoveryHandler func()
+
 // Monitor watches for Apple Studio Display connect/disconnect events.
 type Monitor struct {
-	conn    *netlink.UEventConn
-	handler EventHandler
-	quit    chan struct{}
-	stopped bool
-	mu      sync.Mutex
+	conn            *netlink.UEventConn
+	handler         EventHandler
+	recoveryHandler RecoveryHandler
+	quit            chan struct{}
+	stopped         bool
+	mu              sync.Mutex
 }
 
 // NewMonitor creates a new udev monitor with the given event handler.
@@ -50,6 +57,14 @@ func NewMonitor(handler EventHandler) *Monitor {
 	return &Monitor{
 		handler: handler,
 	}
+}
+
+// SetRecoveryHandler sets the handler called when the monitor recovers from errors.
+// This should trigger a display refresh to recover from potentially missed events.
+func (m *Monitor) SetRecoveryHandler(handler RecoveryHandler) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.recoveryHandler = handler
 }
 
 // Start begins monitoring for device events.
@@ -158,13 +173,39 @@ func (m *Monitor) processEvents(queue chan netlink.UEvent, errs chan error) {
 			// Check if we're stopping
 			m.mu.Lock()
 			stopped := m.stopped
+			recoveryHandler := m.recoveryHandler
 			m.mu.Unlock()
 			if stopped {
 				return
 			}
+
+			// Handle netlink buffer overflow (ENOBUFS) gracefully.
+			// When this occurs, events may have been dropped, so we trigger
+			// a recovery refresh to re-enumerate displays.
+			if isBufferOverflowError(err) {
+				log.Warn().Msg("Netlink buffer overflow detected, triggering recovery refresh")
+				if recoveryHandler != nil {
+					go recoveryHandler()
+				}
+				continue
+			}
+
 			log.Error().Err(err).Msg("udev monitor error")
 		}
 	}
+}
+
+// isBufferOverflowError checks if the error is a netlink buffer overflow (ENOBUFS).
+func isBufferOverflowError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Check for ENOBUFS using errors.Is for wrapped error support
+	if errors.Is(err, syscall.ENOBUFS) {
+		return true
+	}
+	// Fallback: check error message for non-wrapped cases from the udev library
+	return strings.Contains(err.Error(), "no buffer space available")
 }
 
 // handleEvent processes a single udev event.

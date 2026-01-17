@@ -68,8 +68,40 @@ export const AsdToggle = GObject.registerClass({
             })
         );
 
+        // Handle daemon availability changes (restart/crash recovery)
+        this._daemonDisconnects.push(
+            this._daemon.onDaemonAvailable(() => {
+                console.log('[AsdBrightness] Daemon available, refreshing displays');
+                this._refreshDisplays();
+            })
+        );
+
+        this._daemonDisconnects.push(
+            this._daemon.onDaemonUnavailable(() => {
+                console.log('[AsdBrightness] Daemon unavailable, clearing displays');
+                this._clearDisplays();
+            })
+        );
+
         // Initial display enumeration
         this._refreshDisplays();
+    }
+
+    /**
+     * Clears all display items when daemon becomes unavailable.
+     */
+    _clearDisplays() {
+        if (!this._displayItems) {
+            return;
+        }
+
+        this._displayItems.forEach(({item, signalId}, _serial) => {
+            item.disconnect(signalId);
+            item.destroy();
+        });
+        this._displayItems.clear();
+
+        this._updateVisibility();
     }
 
     /**
@@ -253,6 +285,18 @@ export const AsdIndicator = GObject.registerClass({
         );
         this._daemonDisconnects.push(
             this._daemon.onDisplayRemoved(() => this._updateIndicator())
+        );
+
+        // Handle daemon availability changes
+        this._daemonDisconnects.push(
+            this._daemon.onDaemonAvailable(() => this._updateIndicator())
+        );
+        this._daemonDisconnects.push(
+            this._daemon.onDaemonUnavailable(() => {
+                if (this._indicator) {
+                    this._indicator.visible = false;
+                }
+            })
         );
     }
 

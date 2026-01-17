@@ -1,7 +1,9 @@
 package udev
 
 import (
+	"errors"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/pilebones/go-udev/netlink"
@@ -321,6 +323,64 @@ func TestMonitor_CreateMatcher(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := matcher.Evaluate(tt.uevent)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestMonitor_SetRecoveryHandler(t *testing.T) {
+	monitor := NewMonitor(nil)
+	assert.Nil(t, monitor.recoveryHandler)
+
+	handlerCalled := false
+	handler := func() {
+		handlerCalled = true
+	}
+
+	monitor.SetRecoveryHandler(handler)
+	assert.NotNil(t, monitor.recoveryHandler)
+
+	// Verify handler is stored correctly
+	monitor.recoveryHandler()
+	assert.True(t, handlerCalled)
+}
+
+func TestIsBufferOverflowError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "nil error returns false",
+			err:      nil,
+			expected: false,
+		},
+		{
+			name:     "ENOBUFS syscall error returns true",
+			err:      syscall.ENOBUFS,
+			expected: true,
+		},
+		{
+			name:     "error message with 'no buffer space available' returns true",
+			err:      errors.New("unable to check available uevent, err: no buffer space available"),
+			expected: true,
+		},
+		{
+			name:     "generic error returns false",
+			err:      errors.New("some other error"),
+			expected: false,
+		},
+		{
+			name:     "different syscall error returns false",
+			err:      syscall.EINVAL,
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isBufferOverflowError(tt.err)
 			assert.Equal(t, tt.expected, result)
 		})
 	}

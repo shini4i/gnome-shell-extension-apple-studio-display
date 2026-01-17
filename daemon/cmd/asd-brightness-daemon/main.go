@@ -70,6 +70,7 @@ func run() {
 
 	// Initialize udev monitor for hot-plug detection
 	monitor := udev.NewMonitor(createHotplugHandler(manager, server))
+	monitor.SetRecoveryHandler(createRecoveryHandler(manager, server))
 	if err := monitor.Start(); err != nil {
 		log.Error().Err(err).Msg("Failed to start udev monitor (hot-plug detection disabled)")
 	}
@@ -96,15 +97,51 @@ func run() {
 	log.Info().Msg("Daemon stopped")
 }
 
-// createHotplugHandler returns an event handler that refreshes displays and emits D-Bus signals.
-// The handler serializes hot-plug event processing to prevent race conditions.
-func createHotplugHandler(manager *hid.Manager, server *dbus.Server) udev.EventHandler {
-	var mu sync.Mutex
+// refreshMu serializes display refresh operations to prevent race conditions
+// between hotplug handlers and recovery handlers.
+var refreshMu sync.Mutex
 
+// refreshDisplaysWithRetry attempts to refresh displays with linear backoff.
+// It retries up to maxRetries times with increasing delays between attempts.
+func refreshDisplaysWithRetry(manager *hid.Manager, maxRetries int) error {
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			// Linear backoff: 500ms, 1000ms, 1500ms, ...
+			backoff := time.Duration(attempt) * 500 * time.Millisecond
+			log.Debug().
+				Int("attempt", attempt).
+				Dur("backoff", backoff).
+				Msg("Retrying display refresh")
+			time.Sleep(backoff)
+		}
+
+		if err := manager.RefreshDisplays(); err != nil {
+			lastErr = err
+			log.Warn().
+				Err(err).
+				Int("attempt", attempt+1).
+				Int("maxRetries", maxRetries+1).
+				Msg("Display refresh failed")
+			continue
+		}
+
+		// Success
+		if attempt > 0 {
+			log.Info().Int("attempts", attempt+1).Msg("Display refresh succeeded after retry")
+		}
+		return nil
+	}
+	return lastErr
+}
+
+// createHotplugHandler returns an event handler that refreshes displays and emits D-Bus signals.
+// The handler uses the shared refreshMu to prevent race conditions with recovery handlers.
+func createHotplugHandler(manager *hid.Manager, server *dbus.Server) udev.EventHandler {
 	return func(event udev.Event) {
-		// Serialize hot-plug event processing to prevent race conditions
-		mu.Lock()
-		defer mu.Unlock()
+		// Use shared mutex to serialize with recovery handler
+		refreshMu.Lock()
+		defer refreshMu.Unlock()
 
 		// Get the list of displays before refresh to detect changes
 		oldDisplays := make(map[string]hid.DeviceInfo)
@@ -119,9 +156,9 @@ func createHotplugHandler(manager *hid.Manager, server *dbus.Server) udev.EventH
 			time.Sleep(500 * time.Millisecond)
 		}
 
-		// Refresh displays
-		if err := manager.RefreshDisplays(); err != nil {
-			log.Error().Err(err).Msg("Failed to refresh displays after hot-plug event")
+		// Refresh displays with retry logic for resilience
+		if err := refreshDisplaysWithRetry(manager, 3); err != nil {
+			log.Error().Err(err).Msg("Failed to refresh displays after hot-plug event (all retries exhausted)")
 			return
 		}
 
@@ -144,6 +181,57 @@ func createHotplugHandler(manager *hid.Manager, server *dbus.Server) udev.EventH
 				server.EmitDisplayRemoved(serial)
 			}
 		}
+	}
+}
+
+// createRecoveryHandler returns a handler for netlink buffer overflow recovery.
+// It triggers a display refresh to recover from potentially missed udev events.
+// The handler uses the shared refreshMu to prevent race conditions with hotplug handlers.
+func createRecoveryHandler(manager *hid.Manager, server *dbus.Server) udev.RecoveryHandler {
+	return func() {
+		// Use shared mutex to serialize with hotplug handler
+		refreshMu.Lock()
+		defer refreshMu.Unlock()
+
+		log.Info().Msg("Performing recovery refresh after netlink buffer overflow")
+
+		// Get current displays before refresh
+		oldDisplays := make(map[string]hid.DeviceInfo)
+		for _, d := range manager.ListDisplays() {
+			oldDisplays[d.Serial] = d
+		}
+
+		// Wait a moment for any pending USB operations to settle
+		time.Sleep(500 * time.Millisecond)
+
+		// Refresh with retry
+		if err := refreshDisplaysWithRetry(manager, 3); err != nil {
+			log.Error().Err(err).Msg("Recovery refresh failed (all retries exhausted)")
+			return
+		}
+
+		// Get displays after refresh
+		newDisplays := make(map[string]hid.DeviceInfo)
+		for _, d := range manager.ListDisplays() {
+			newDisplays[d.Serial] = d
+		}
+
+		// Emit signals for any changes detected
+		for serial, info := range newDisplays {
+			if _, exists := oldDisplays[serial]; !exists {
+				log.Info().Str("serial", serial).Msg("Display found during recovery")
+				server.EmitDisplayAdded(serial, info.Product)
+			}
+		}
+
+		for serial := range oldDisplays {
+			if _, exists := newDisplays[serial]; !exists {
+				log.Info().Str("serial", serial).Msg("Display lost during recovery")
+				server.EmitDisplayRemoved(serial)
+			}
+		}
+
+		log.Info().Int("displays", len(newDisplays)).Msg("Recovery refresh completed")
 	}
 }
 

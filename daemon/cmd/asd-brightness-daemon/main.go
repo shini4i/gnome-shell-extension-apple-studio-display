@@ -11,6 +11,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
+	gohid "github.com/sstallion/go-hid"
 
 	"github.com/shini4i/asd-brightness-daemon/internal/dbus"
 	"github.com/shini4i/asd-brightness-daemon/internal/hid"
@@ -48,6 +49,16 @@ func run() {
 	}
 
 	log.Info().Msg("Starting asd-brightness-daemon")
+
+	// Initialize HID library (recommended for concurrent programs)
+	if err := gohid.Init(); err != nil {
+		log.Fatal().Err(err).Msg("Failed to initialize HID library")
+	}
+	defer func() {
+		if err := gohid.Exit(); err != nil {
+			log.Error().Err(err).Msg("Failed to cleanup HID library")
+		}
+	}()
 
 	// Initialize HID manager
 	manager := hid.NewManager()

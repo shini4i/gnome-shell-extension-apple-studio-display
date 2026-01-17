@@ -26,7 +26,7 @@ export const DisplayControlItem = GObject.registerClass({
      *
      * @param {string} serial - Display serial number
      * @param {string} productName - Display product name
-     * @param {number} initialBrightness - Initial brightness (0-100)
+     * @param {number} initialBrightness - Initial brightness (0-100), or null if fetch failed
      */
     _init(serial, productName, initialBrightness = 50) {
         super._init({
@@ -35,7 +35,8 @@ export const DisplayControlItem = GObject.registerClass({
         });
 
         this._serial = serial;
-        this._brightness = initialBrightness;
+        this._hasError = initialBrightness === null;
+        this._brightness = this._hasError ? 50 : initialBrightness;
         this._dragging = false;
 
         // Container for the entire control
@@ -122,6 +123,30 @@ export const DisplayControlItem = GObject.registerClass({
         box.add_child(sliderBox);
 
         this.add_child(box);
+
+        // If there was an error fetching brightness, disable the slider
+        if (this._hasError) {
+            this._setErrorState(true);
+        }
+    }
+
+    /**
+     * Sets the error state of the control.
+     * When in error state, the slider is disabled and shows an error indication.
+     *
+     * @param {boolean} hasError - Whether the control is in error state
+     */
+    _setErrorState(hasError) {
+        this._hasError = hasError;
+        this._slider.reactive = !hasError;
+
+        if (hasError) {
+            this._percentLabel.text = '--';
+            this._slider.add_style_class_name('asd-slider-error');
+        } else {
+            this._percentLabel.text = `${Math.round(this._brightness)}%`;
+            this._slider.remove_style_class_name('asd-slider-error');
+        }
     }
 
     /**
@@ -155,12 +180,18 @@ export const DisplayControlItem = GObject.registerClass({
     /**
      * Updates the brightness from an external source (e.g., D-Bus signal).
      * Does not emit brightness-changed signal to avoid loops.
+     * Clears error state if previously in error.
      *
      * @param {number} value - Brightness (0-100)
      */
     updateBrightness(value) {
         if (this._dragging) {
             return;
+        }
+
+        // Clear error state if we receive a valid brightness update
+        if (this._hasError) {
+            this._setErrorState(false);
         }
 
         this._brightness = Math.max(0, Math.min(100, value));

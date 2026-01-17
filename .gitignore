@@ -4,7 +4,7 @@
 *.dll
 *.so
 *.dylib
-asd-brightness-daemon
+/daemon/asd-brightness-daemon
 
 # Test binary
 *.test

@@ -15,6 +15,12 @@ const (
 	// ReportSize is the size of the HID feature report in bytes.
 	ReportSize = 7
 
+	// ReportOffsetNits is the byte offset where the nits value starts in the HID report.
+	ReportOffsetNits = 1
+
+	// ReportLenNits is the length in bytes of the nits value in the HID report.
+	ReportLenNits = 4
+
 	// AppleVendorID is the USB vendor ID for Apple.
 	AppleVendorID uint16 = 0x05ac
 
@@ -59,7 +65,7 @@ func (d *Display) GetBrightness() (uint8, error) {
 	}
 
 	// Parse brightness value from little-endian bytes
-	nits := binary.LittleEndian.Uint32(data[1:5])
+	nits := binary.LittleEndian.Uint32(data[ReportOffsetNits : ReportOffsetNits+ReportLenNits])
 	percent := brightness.NitsToPercent(nits)
 
 	return percent, nil
@@ -78,7 +84,7 @@ func (d *Display) SetBrightness(percent uint8) error {
 
 	data := make([]byte, ReportSize)
 	data[0] = ReportID
-	binary.LittleEndian.PutUint32(data[1:5], nits)
+	binary.LittleEndian.PutUint32(data[ReportOffsetNits:ReportOffsetNits+ReportLenNits], nits)
 
 	_, err := d.device.SendFeatureReport(data)
 	if err != nil {

@@ -337,3 +337,32 @@ func TestServer_Constants(t *testing.T) {
 	assert.Equal(t, "/io/github/shini4i/AsdBrightness", ObjectPath)
 	assert.Equal(t, "io.github.shini4i.AsdBrightness", InterfaceName)
 }
+
+func TestServer_RateLimiting(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	// Create a mock device that allows unlimited calls
+	mockDevice := mocks.NewMockDevice(ctrl)
+	mockDevice.EXPECT().Info().Return(hid.DeviceInfo{Serial: "ABC123"}).AnyTimes()
+	mockDevice.EXPECT().SendFeatureReport(gomock.Any()).Return(7, nil).AnyTimes()
+
+	display := hid.NewDisplay(mockDevice)
+	manager := &mockDisplayManager{
+		displayMap: map[string]*hid.Display{"ABC123": display},
+	}
+	server := NewServer(manager)
+
+	// Exhaust the burst limit (rateLimitBurst = 5)
+	var rateLimitHit bool
+	for i := 0; i < 20; i++ {
+		err := server.SetBrightness("ABC123", 50)
+		if err != nil {
+			rateLimitHit = true
+			assert.Contains(t, err.Error(), "rate limit exceeded")
+			break
+		}
+	}
+
+	assert.True(t, rateLimitHit, "Rate limiter should have been triggered")
+}

@@ -10,10 +10,22 @@ import (
 	"github.com/godbus/dbus/v5/introspect"
 	"github.com/rs/zerolog/log"
 	"github.com/shini4i/asd-brightness-daemon/internal/hid"
+	"golang.org/x/time/rate"
 )
 
 // ErrEmptySerial is returned when an empty serial number is provided.
 var ErrEmptySerial = errors.New("serial cannot be empty")
+
+// ErrRateLimitExceeded is returned when brightness change requests exceed the rate limit.
+var ErrRateLimitExceeded = errors.New("rate limit exceeded")
+
+const (
+	// rateLimitPerSecond is the maximum number of brightness changes per second.
+	rateLimitPerSecond = 20
+
+	// rateLimitBurst is the maximum burst size for brightness changes.
+	rateLimitBurst = 5
+)
 
 const (
 	// ServiceName is the D-Bus service name.
@@ -90,15 +102,17 @@ type DisplayManager interface {
 //     read-modify-write operations. Concurrent calls may result in missed
 //     increments. This is acceptable for typical keyboard shortcut usage.
 type Server struct {
-	conn   *dbus.Conn
-	connMu sync.RWMutex // Protects conn field only
-	manager DisplayManager
+	conn        *dbus.Conn
+	connMu      sync.RWMutex // Protects conn field only
+	manager     DisplayManager
+	rateLimiter *rate.Limiter
 }
 
 // NewServer creates a new D-Bus server with the given display manager.
 func NewServer(manager DisplayManager) *Server {
 	return &Server{
-		manager: manager,
+		manager:     manager,
+		rateLimiter: rate.NewLimiter(rateLimitPerSecond, rateLimitBurst),
 	}
 }
 
@@ -180,6 +194,11 @@ func (s *Server) GetBrightness(serial string) (uint32, *dbus.Error) {
 
 // SetBrightness sets the brightness of a display to a percentage (0-100).
 func (s *Server) SetBrightness(serial string, brightness uint32) *dbus.Error {
+	if !s.rateLimiter.Allow() {
+		log.Warn().Msg("Rate limit exceeded for SetBrightness")
+		return dbus.MakeFailedError(ErrRateLimitExceeded)
+	}
+
 	if serial == "" {
 		return dbus.MakeFailedError(ErrEmptySerial)
 	}
@@ -210,6 +229,11 @@ func (s *Server) SetBrightness(serial string, brightness uint32) *dbus.Error {
 
 // IncreaseBrightness increases the brightness of a display by a step.
 func (s *Server) IncreaseBrightness(serial string, step uint32) *dbus.Error {
+	if !s.rateLimiter.Allow() {
+		log.Warn().Msg("Rate limit exceeded for IncreaseBrightness")
+		return dbus.MakeFailedError(ErrRateLimitExceeded)
+	}
+
 	if serial == "" {
 		return dbus.MakeFailedError(ErrEmptySerial)
 	}
@@ -242,6 +266,11 @@ func (s *Server) IncreaseBrightness(serial string, step uint32) *dbus.Error {
 
 // DecreaseBrightness decreases the brightness of a display by a step.
 func (s *Server) DecreaseBrightness(serial string, step uint32) *dbus.Error {
+	if !s.rateLimiter.Allow() {
+		log.Warn().Msg("Rate limit exceeded for DecreaseBrightness")
+		return dbus.MakeFailedError(ErrRateLimitExceeded)
+	}
+
 	if serial == "" {
 		return dbus.MakeFailedError(ErrEmptySerial)
 	}
@@ -276,6 +305,11 @@ func (s *Server) DecreaseBrightness(serial string, step uint32) *dbus.Error {
 
 // SetAllBrightness sets the brightness of all displays to a percentage (0-100).
 func (s *Server) SetAllBrightness(brightness uint32) *dbus.Error {
+	if !s.rateLimiter.Allow() {
+		log.Warn().Msg("Rate limit exceeded for SetAllBrightness")
+		return dbus.MakeFailedError(ErrRateLimitExceeded)
+	}
+
 	if brightness > 100 {
 		brightness = 100
 	}

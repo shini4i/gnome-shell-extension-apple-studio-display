@@ -109,7 +109,8 @@ export const AsdToggle = GObject.registerClass({
             return;
         }
 
-        const brightness = await this._daemon.getBrightness(serial) ?? 50;
+        // Pass null to DisplayControlItem if fetch fails - it will show error state
+        const brightness = await this._daemon.getBrightness(serial);
 
         // Guard against destruction during await
         if (!this._displayItems) {

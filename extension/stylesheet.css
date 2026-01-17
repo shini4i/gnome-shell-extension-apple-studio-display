@@ -55,3 +55,8 @@
     font-style: italic;
     color: rgba(255, 255, 255, 0.5);
 }
+
+/* Slider error state (when brightness fetch failed) */
+.asd-slider-error {
+    opacity: 0.4;
+}

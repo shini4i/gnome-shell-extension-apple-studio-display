@@ -101,14 +101,24 @@ func run() {
 // between hotplug handlers and recovery handlers.
 var refreshMu sync.Mutex
 
-// refreshDisplaysWithRetry attempts to refresh displays with linear backoff.
-// It retries up to maxRetries times with increasing delays between attempts.
+const (
+	// maxBackoffDuration caps the exponential backoff to prevent excessive waits.
+	maxBackoffDuration = 16 * time.Second
+)
+
+// refreshDisplaysWithRetry attempts to refresh displays with exponential backoff.
+// It retries up to maxRetries times with exponentially increasing delays (1s, 2s, 4s, 8s, 16s).
+// The function checks if displays were found, not just if RefreshDisplays succeeded,
+// since USB-C dock connected displays may take time for HID interfaces to become ready.
 func refreshDisplaysWithRetry(manager *hid.Manager, maxRetries int) error {
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
-			// Linear backoff: 500ms, 1000ms, 1500ms, ...
-			backoff := time.Duration(attempt) * 500 * time.Millisecond
+			// Exponential backoff: 1s, 2s, 4s, 8s, 16s (capped)
+			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
+			if backoff > maxBackoffDuration {
+				backoff = maxBackoffDuration
+			}
 			log.Debug().
 				Int("attempt", attempt).
 				Dur("backoff", backoff).
@@ -126,13 +136,27 @@ func refreshDisplaysWithRetry(manager *hid.Manager, maxRetries int) error {
 			continue
 		}
 
-		// Success
-		if attempt > 0 {
-			log.Info().Int("attempts", attempt+1).Msg("Display refresh succeeded after retry")
+		// Check if we actually found displays (HID interface may not be ready yet)
+		if manager.Count() > 0 {
+			if attempt > 0 {
+				log.Info().Int("attempts", attempt+1).Msg("Display refresh succeeded after retry")
+			}
+			return nil
 		}
-		return nil
+
+		// RefreshDisplays succeeded but found 0 displays - HID interface not ready yet
+		log.Debug().
+			Int("attempt", attempt+1).
+			Int("maxRetries", maxRetries+1).
+			Msg("Refresh succeeded but no displays found, HID interface may not be ready")
+		lastErr = nil // Clear error since refresh itself succeeded
 	}
-	return lastErr
+
+	// All retries exhausted
+	if lastErr != nil {
+		return lastErr
+	}
+	return nil // No error, just no displays found
 }
 
 // createHotplugHandler returns an event handler that refreshes displays and emits D-Bus signals.
@@ -201,11 +225,13 @@ func createRecoveryHandler(manager *hid.Manager, server *dbus.Server) udev.Recov
 			oldDisplays[d.Serial] = d
 		}
 
-		// Wait a moment for any pending USB operations to settle
-		time.Sleep(500 * time.Millisecond)
+		// Wait for USB operations to settle - USB-C dock connected displays
+		// may take several seconds for HID interfaces to become ready
+		time.Sleep(2 * time.Second)
 
-		// Refresh with retry
-		if err := refreshDisplaysWithRetry(manager, 3); err != nil {
+		// Refresh with retry using exponential backoff
+		// Total max wait: 2s initial + 1s + 2s + 4s + 8s + 16s = ~33 seconds
+		if err := refreshDisplaysWithRetry(manager, 5); err != nil {
 			log.Error().Err(err).Msg("Recovery refresh failed (all retries exhausted)")
 			return
 		}

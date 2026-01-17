@@ -123,6 +123,10 @@ export class AsdDaemon {
         if (this._proxy !== null && !this._isReconnecting) {
             console.log('[AsdBrightness] Reconnecting to daemon after restart');
             await this._reconnect();
+        } else if (this._proxy === null && !this._isReconnecting) {
+            // Initial connect failed, attempt a fresh connection now that daemon is available
+            console.log('[AsdBrightness] Attempting fresh connection to daemon');
+            await this._connect();
         }
 
         // Guard against destruction during await
@@ -130,8 +134,10 @@ export class AsdDaemon {
             return;
         }
 
-        // Notify listeners that daemon is available
-        this._callbacks.daemonAvailable.forEach(cb => cb());
+        // Only notify listeners if we actually have a connection
+        if (this._proxy !== null) {
+            this._callbacks.daemonAvailable.forEach(cb => cb());
+        }
     }
 
     /**

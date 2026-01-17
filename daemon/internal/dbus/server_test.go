@@ -57,9 +57,10 @@ func TestServer_ListDisplays(t *testing.T) {
 	result, err := server.ListDisplays()
 	require.Nil(t, err)
 	require.Len(t, result, 2)
-	assert.Equal(t, "ABC123", result[0][0])
-	assert.Equal(t, "Apple Studio Display", result[0][1])
-	assert.Equal(t, "DEF456", result[1][0])
+	assert.Equal(t, "ABC123", result[0].Serial)
+	assert.Equal(t, "Apple Studio Display", result[0].ProductName)
+	assert.Equal(t, "DEF456", result[1].Serial)
+	assert.Equal(t, "Apple Studio Display", result[1].ProductName)
 }
 
 func TestServer_ListDisplays_Empty(t *testing.T) {

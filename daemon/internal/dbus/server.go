@@ -93,6 +93,13 @@ type DisplayManager interface {
 	RefreshDisplays() error
 }
 
+// DisplayInfo represents display information returned via D-Bus.
+// Serializes to D-Bus type (ss) - a struct containing serial and product name.
+type DisplayInfo struct {
+	Serial      string
+	ProductName string
+}
+
 // Server implements the D-Bus service for brightness control.
 //
 // Thread safety:
@@ -158,12 +165,12 @@ func (s *Server) Stop() error {
 }
 
 // ListDisplays returns a list of all connected displays.
-// Returns an array of tuples: [(serial, productName), ...]
-func (s *Server) ListDisplays() ([][2]string, *dbus.Error) {
+// Returns an array of structs: [{Serial, ProductName}, ...]
+func (s *Server) ListDisplays() ([]DisplayInfo, *dbus.Error) {
 	displays := s.manager.ListDisplays()
-	result := make([][2]string, len(displays))
+	result := make([]DisplayInfo, len(displays))
 	for i, d := range displays {
-		result[i] = [2]string{d.Serial, d.Product}
+		result[i] = DisplayInfo{Serial: d.Serial, ProductName: d.Product}
 	}
 
 	log.Debug().Int("count", len(result)).Msg("Listed displays")

@@ -32,6 +32,7 @@
 
             # Build tools
             go-task
+            goreleaser
 
             # D-Bus testing
             dbus

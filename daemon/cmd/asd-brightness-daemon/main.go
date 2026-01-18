@@ -206,6 +206,7 @@ func refreshDisplaysWithRetry(manager *hid.Manager, maxRetries int) (bool, error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			// Exponential backoff: 1s, 2s, 4s, 8s, 16s (capped)
+			// #nosec G115 -- attempt is bounded by maxRetries (small positive int)
 			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
 			if backoff > maxBackoffDuration {
 				backoff = maxBackoffDuration

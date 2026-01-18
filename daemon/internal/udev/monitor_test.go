@@ -170,7 +170,7 @@ func TestMonitor_HandleEvent(t *testing.T) {
 			expectHandler: false,
 		},
 		{
-			name: "missing DEVTYPE is ignored",
+			name: "missing DEVTYPE is ignored for add events",
 			uevent: netlink.UEvent{
 				Action: netlink.ADD,
 				KObj:   "/devices/pci0000:00/usb1/1-1",
@@ -179,6 +179,44 @@ func TestMonitor_HandleEvent(t *testing.T) {
 				},
 			},
 			expectHandler: false,
+		},
+		{
+			name: "remove event without DEVTYPE triggers handler",
+			uevent: netlink.UEvent{
+				Action: netlink.REMOVE,
+				KObj:   "/devices/pci0000:00/usb1/1-1",
+				Env: map[string]string{
+					"PRODUCT": "5ac/1114/157",
+				},
+			},
+			expectHandler: true,
+			expectedType:  EventRemove,
+		},
+		{
+			name: "remove event with empty DEVTYPE triggers handler",
+			uevent: netlink.UEvent{
+				Action: netlink.REMOVE,
+				KObj:   "/devices/pci0000:00/usb1/1-1",
+				Env: map[string]string{
+					"DEVTYPE": "",
+					"PRODUCT": "5ac/1114/157",
+				},
+			},
+			expectHandler: true,
+			expectedType:  EventRemove,
+		},
+		{
+			name: "remove event for usb_interface also triggers handler",
+			uevent: netlink.UEvent{
+				Action: netlink.REMOVE,
+				KObj:   "/devices/pci0000:00/usb1/1-1/1-1:1.0",
+				Env: map[string]string{
+					"DEVTYPE": "usb_interface",
+					"PRODUCT": "5ac/1114/157",
+				},
+			},
+			expectHandler: true,
+			expectedType:  EventRemove,
 		},
 	}
 

@@ -210,9 +210,11 @@ func isBufferOverflowError(err error) bool {
 
 // handleEvent processes a single udev event.
 func (m *Monitor) handleEvent(uevent netlink.UEvent) {
-	// Filter for usb_device type only (not usb_interface)
+	// Filter for usb_device type only (not usb_interface) on ADD events.
+	// For REMOVE events, DEVTYPE may not be present since the device is already gone,
+	// so we skip this check. The matcher already ensures we only receive Studio Display events.
 	devtype := uevent.Env["DEVTYPE"]
-	if devtype != "usb_device" {
+	if uevent.Action == netlink.ADD && devtype != "usb_device" {
 		return
 	}
 

@@ -15,10 +15,10 @@ builds:
       - CGO_ENABLED=1
 
 nfpms:
-  - id: packages
+  - id: deb-package
     package_name: asd-brightness
     file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    builds:
+    ids:
       - asd-brightness-daemon
     vendor: shini4i
     maintainer: "Vadim Gedz <github@shini4i.dev>"
@@ -26,38 +26,40 @@ nfpms:
     license: GPL-3.0
     formats:
       - deb
-      - rpm
-
-    overrides:
-      deb:
-        depends:
-          - gnome-shell
-          - libhidapi-hidraw0
-      rpm:
-        depends:
-          - gnome-shell
-          - hidapi
-
-    contents:
-      # Systemd User Service
+    dependencies:
+      - gnome-shell
+      - libhidapi-hidraw0
+    contents: &package-contents
       - src: ./packaging/systemd/user/asd-brightness.service
         dst: /usr/lib/systemd/user/asd-brightness.service
         file_info:
           mode: 0644
-
-      # Udev Rules
       - src: ./packaging/rules.d/90-apple-studio-display.rules
         dst: /etc/udev/rules.d/90-apple-studio-display.rules
         file_info:
           mode: 0644
-
-      # GNOME Extension
       - src: ./extension/
         dst: /usr/share/gnome-shell/extensions/asd-brightness@shini4i.github.io/
-
-    scripts:
+    scripts: &package-scripts
       postinstall: ./packaging/scripts/postinstall.sh
       preremove: ./packaging/scripts/preremove.sh
+
+  - id: rpm-package
+    package_name: asd-brightness
+    file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    ids:
+      - asd-brightness-daemon
+    vendor: shini4i
+    maintainer: "Vadim Gedz <github@shini4i.dev>"
+    description: "Apple Studio Display Brightness Control for GNOME"
+    license: GPL-3.0
+    formats:
+      - rpm
+    dependencies:
+      - gnome-shell
+      - hidapi
+    contents: *package-contents
+    scripts: *package-scripts
 
 changelog:
   use: github-native

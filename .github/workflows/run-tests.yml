@@ -5,11 +5,15 @@ on:
     branches: [main]
     paths:
       - 'daemon/**'
+      - 'flake.nix'
+      - 'flake.lock'
       - '.github/workflows/run-tests.yml'
   pull_request:
     branches: [main]
     paths:
       - 'daemon/**'
+      - 'flake.nix'
+      - 'flake.lock'
       - '.github/workflows/run-tests.yml'
 
 permissions:
@@ -19,31 +23,19 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: daemon
 
     steps:
       - name: Checkout code
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
 
-      - name: Setup Go
-        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
-        with:
-          go-version-file: daemon/go.mod
-          cache-dependency-path: daemon/go.sum
-
-      - name: Download dependencies
-        run: go mod download
-
-      - name: Install mockgen
-        run: go install go.uber.org/mock/mockgen@latest
+      - name: Install Nix
+        uses: cachix/install-nix-action@4e002c8ec80594ecd40e759629461e26c8abed15 # v31.9.0
 
       - name: Generate mocks
-        run: go generate ./...
+        run: nix develop --command bash -c "cd daemon && go generate ./..."
 
       - name: Run tests
-        run: go test -race ./...
+        run: nix develop --command bash -c "cd daemon && go test -race ./..."
 
   lint:
     name: Lint
@@ -53,14 +45,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
 
-      - name: Setup Go
-        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
-        with:
-          go-version-file: daemon/go.mod
-          cache-dependency-path: daemon/go.sum
+      - name: Install Nix
+        uses: cachix/install-nix-action@4e002c8ec80594ecd40e759629461e26c8abed15 # v31.9.0
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
-        with:
-          working-directory: daemon
-          version: v2.8.0
+        run: nix develop --command bash -c "cd daemon && golangci-lint run"

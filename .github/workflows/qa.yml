@@ -1,4 +1,4 @@
-name: Run Tests
+name: Quality Assurance
 
 on:
   push:
@@ -7,14 +7,18 @@ on:
       - 'daemon/**'
       - 'flake.nix'
       - 'flake.lock'
-      - '.github/workflows/run-tests.yml'
+      - '.github/workflows/qa.yml'
   pull_request:
     branches: [main]
     paths:
       - 'daemon/**'
       - 'flake.nix'
       - 'flake.lock'
-      - '.github/workflows/run-tests.yml'
+      - '.github/workflows/qa.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read

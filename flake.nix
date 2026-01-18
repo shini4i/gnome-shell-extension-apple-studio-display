@@ -18,9 +18,11 @@
             go_1_25
             gopls
             golangci-lint
+            gosec
+            mockgen
             delve
 
-            # Required for karalabe/hid (CGO)
+            # Required for sstallion/go-hid (CGO)
             pkg-config
             hidapi
             libusb1

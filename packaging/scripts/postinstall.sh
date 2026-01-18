@@ -7,24 +7,16 @@ if command -v udevadm >/dev/null 2>&1; then
     udevadm trigger --subsystem-match=hidraw
 fi
 
-# Enable the user service for the installing user
-if [ -n "$SUDO_USER" ]; then
-    SUDO_UID=$(id -u "$SUDO_USER")
-    if [ -d "/run/user/$SUDO_UID" ]; then
-        sudo -u "$SUDO_USER" XDG_RUNTIME_DIR="/run/user/$SUDO_UID" \
-            systemctl --user enable asd-brightness.service || true
-    fi
+# Enable the user service globally for all users (current and future)
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl --global enable asd-brightness.service
 fi
 
 cat <<'EOF'
 ================================================================================
 Apple Studio Display Brightness Control installed successfully!
 
-Enable and start the daemon:
-    systemctl --user enable --now asd-brightness.service
-
-The GNOME extension will be available after restarting GNOME Shell:
-    - Wayland: Log out and log back in
-    - X11: Press Alt+F2, type 'r', press Enter
+Please LOG OUT and LOG BACK IN to apply changes.
+(This is required for the GNOME Extension to load and the service to start)
 ================================================================================
 EOF

@@ -98,7 +98,13 @@ sudo dpkg -i asd-brightness_*.deb
 sudo rpm -i asd-brightness-*.rpm
 ```
 
-After installation, log out and back in. The service will start automatically and the extension will appear in GNOME Quick Settings.
+After installation, log out and back in to start the service, then enable the extension:
+
+```bash
+gnome-extensions enable asd-brightness@shini4i.github.io
+```
+
+Alternatively, use the [GNOME Extensions](https://apps.gnome.org/Extensions/) app to enable it.
 
 ## Development
 

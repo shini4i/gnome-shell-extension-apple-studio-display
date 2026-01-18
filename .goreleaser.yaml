@@ -1,0 +1,70 @@
+version: 2
+
+project_name: asd-brightness-daemon
+
+builds:
+  - id: asd-brightness-daemon
+    dir: daemon
+    main: ./cmd/asd-brightness-daemon
+    binary: asd-brightness-daemon
+    goos:
+      - linux
+    goarch:
+      - amd64
+    env:
+      - CGO_ENABLED=1
+
+nfpms:
+  - id: packages
+    package_name: asd-brightness
+    file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    builds:
+      - asd-brightness-daemon
+    vendor: shini4i
+    maintainer: "Vadim Gedz <github@shini4i.dev>"
+    description: "Apple Studio Display Brightness Control for GNOME"
+    license: GPL-3.0
+    formats:
+      - deb
+      - rpm
+
+    overrides:
+      deb:
+        depends:
+          - gnome-shell
+          - libhidapi-hidraw0
+      rpm:
+        depends:
+          - gnome-shell
+          - hidapi
+
+    contents:
+      # Systemd User Service
+      - src: ./packaging/systemd/user/asd-brightness.service
+        dst: /usr/lib/systemd/user/asd-brightness.service
+        file_info:
+          mode: 0644
+
+      # Udev Rules
+      - src: ./packaging/rules.d/90-apple-studio-display.rules
+        dst: /etc/udev/rules.d/90-apple-studio-display.rules
+        file_info:
+          mode: 0644
+
+      # GNOME Extension
+      - src: ./extension/
+        dst: /usr/share/gnome-shell/extensions/asd-brightness@shini4i.github.io/
+
+    scripts:
+      postinstall: ./packaging/scripts/postinstall.sh
+      preremove: ./packaging/scripts/preremove.sh
+
+changelog:
+  use: github-native
+
+release:
+  github:
+    owner: shini4i
+    name: gnome-shell-extension-apple-studio-display
+  draft: false
+  prerelease: auto

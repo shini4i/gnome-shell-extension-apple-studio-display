@@ -45,14 +45,10 @@ flowchart LR
 
 ## Requirements
 
-- **NixOS** with Flakes enabled
 - GNOME Shell 47, 48, or 49
 - Apple Studio Display connected via USB-C/Thunderbolt
 
 ## Installation
-
-> [!IMPORTANT]
-> Currently, the NixOS module is the only supported installation method.
 
 ### NixOS Module
 
@@ -83,6 +79,32 @@ Add the flake to your inputs and enable the module:
 ```
 
 After rebuilding your system, log out and back in. The extension will appear in GNOME Quick Settings when an Apple Studio Display is connected.
+
+### Debian/Fedora Packages
+
+> [!NOTE]
+> The `.deb` and `.rpm` packages are experimental and have not been thoroughly tested yet.
+> I would appreciate any feedback or bug reports via [GitHub Issues](https://github.com/shini4i/gnome-shell-extension-apple-studio-display/issues).
+
+Pre-built packages are available on the [Releases](https://github.com/shini4i/gnome-shell-extension-apple-studio-display/releases) page.
+
+**Debian/Ubuntu:**
+```bash
+sudo dpkg -i asd-brightness_*.deb
+```
+
+**Fedora/RHEL:**
+```bash
+sudo rpm -i asd-brightness-*.rpm
+```
+
+After installation, log out and back in to start the service, then enable the extension:
+
+```bash
+gnome-extensions enable asd-brightness@shini4i.github.io
+```
+
+Alternatively, use the [GNOME Extensions](https://apps.gnome.org/Extensions/) app to enable it.
 
 ## Development
 

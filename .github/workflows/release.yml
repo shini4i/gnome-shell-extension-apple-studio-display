@@ -5,16 +5,31 @@ on:
     tags:
       - "v[0-9]*.[0-9]*.[0-9]*"
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 permissions:
   contents: write
 
 jobs:
+  release:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@4e002c8ec80594ecd40e759629461e26c8abed15 # v31.9.0
+
+      - name: Run GoReleaser
+        run: nix develop --command goreleaser release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   update-nixpkgs:
     name: Update ${{ matrix.package }}
+    needs: [release]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -34,17 +49,3 @@ jobs:
           version: ${{ github.ref_name }}
           target-repo: shini4i/nixpkgs
           github-token: ${{ secrets.NIXPKGS_TOKEN }}
-
-  create-release:
-    name: Create GitHub Release
-    needs: [update-nixpkgs]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
-        with:
-          generate_release_notes: true

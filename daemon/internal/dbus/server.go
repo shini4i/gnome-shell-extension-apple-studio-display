@@ -286,6 +286,7 @@ func (s *Server) SetBrightness(serial string, brightness uint32) *dbus.Error {
 		brightness = 100
 	}
 
+	// #nosec G115 -- brightness is clamped to 0-100, safe for uint8
 	err = display.SetBrightness(uint8(brightness))
 	if err != nil {
 		s.handleDeviceError(serial, err)
@@ -333,6 +334,7 @@ func (s *Server) IncreaseBrightness(serial string, step uint32) *dbus.Error {
 		newBrightness = 100
 	}
 
+	// #nosec G115 -- newBrightness is clamped to 0-100, safe for uint8
 	err = display.SetBrightness(uint8(newBrightness))
 	if err != nil {
 		s.handleDeviceError(serial, err)
@@ -379,6 +381,7 @@ func (s *Server) DecreaseBrightness(serial string, step uint32) *dbus.Error {
 		newBrightness = 0
 	}
 
+	// #nosec G115 -- newBrightness is clamped to 0-100, safe for uint8
 	err = display.SetBrightness(uint8(newBrightness))
 	if err != nil {
 		s.handleDeviceError(serial, err)
@@ -410,6 +413,7 @@ func (s *Server) SetAllBrightness(brightness uint32) *dbus.Error {
 			continue
 		}
 
+		// #nosec G115 -- brightness is clamped to 0-100, safe for uint8
 		err = display.SetBrightness(uint8(brightness))
 		if err != nil {
 			s.handleDeviceError(info.Serial, err)

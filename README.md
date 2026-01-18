@@ -43,13 +43,65 @@ flowchart LR
     udev -.->|Hot-plug Events| Server
 ```
 
-1. **Go D-Bus Daemon** (`asd-brightness-daemon`) - Communicates with display via USB HID
-2. **GNOME Shell Extension** - Quick Settings UI integration
+## Requirements
+
+- **NixOS** with Flakes enabled
+- GNOME Shell 47, 48, or 49
+- Apple Studio Display connected via USB-C/Thunderbolt
+
+## Installation
+
+> [!IMPORTANT]
+> Currently, the NixOS module is the only supported installation method.
+
+### NixOS Module
+
+Add the flake to your inputs and enable the module:
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    shini4i-pkgs.url = "github:shini4i/nixpkgs";
+  };
+
+  outputs = { self, nixpkgs, shini4i-pkgs, ... }: {
+    nixosConfigurations.your-host = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        shini4i-pkgs.nixosModules.apple-studio-display
+        {
+          programs.apple-studio-display.enable = true;
+
+          # Users must be in the "video" group to access display devices
+          users.users.your-username.extraGroups = [ "video" ];
+        }
+      ];
+    };
+  };
+}
+```
+
+After rebuilding your system, log out and back in. The extension will appear in GNOME Quick Settings when an Apple Studio Display is connected.
 
 ## Development
 
+This project uses Nix for reproducible development environments:
+
 ```bash
-nix develop
-task        # build and test
-task run    # run daemon in verbose mode
+nix develop        # Enter development shell
+task               # Build and test
+task run           # Run daemon in verbose mode
 ```
+
+### Available Task Commands
+
+| Command | Description |
+|---------|-------------|
+| `task build` | Build the daemon binary |
+| `task test` | Run all tests |
+| `task test-race` | Run tests with race detector |
+| `task lint` | Run golangci-lint |
+| `task generate` | Generate mocks |
+| `task coverage` | Generate HTML coverage report |
+| `task run` | Run daemon in verbose mode |

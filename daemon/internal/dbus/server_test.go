@@ -513,3 +513,76 @@ func TestServer_handleDeviceError_NilHandler(t *testing.T) {
 	triggered := server.handleDeviceError("ABC123", syscall.ENODEV)
 	assert.True(t, triggered)
 }
+
+// TestServer_ConcurrentSetDeviceErrorHandler tests that SetDeviceErrorHandler
+// is thread-safe when called concurrently with handleDeviceError.
+func TestServer_ConcurrentSetDeviceErrorHandler(t *testing.T) {
+	manager := &mockDisplayManager{}
+	server := NewServer(manager)
+
+	var wg sync.WaitGroup
+	const numGoroutines = 100
+
+	// Start goroutines that set the handler
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			server.SetDeviceErrorHandler(func(serial string, err error) {
+				// Handler body doesn't matter for this test
+			})
+		}(i)
+	}
+
+	// Concurrently call handleDeviceError
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			server.handleDeviceError("ABC123", syscall.ENODEV)
+		}()
+	}
+
+	wg.Wait()
+	// If we get here without a race detector complaint, the test passes
+}
+
+// TestServer_ConcurrentStopAndEmit tests that Stop and signal emission
+// methods don't race when called concurrently.
+func TestServer_ConcurrentStopAndEmit(t *testing.T) {
+	manager := &mockDisplayManager{}
+	server := NewServer(manager)
+	// Note: conn is nil, but we're testing mutex protection, not actual D-Bus calls
+
+	var wg sync.WaitGroup
+	const numGoroutines = 50
+
+	// Start goroutines that emit signals (conn is nil, so they return early)
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			server.EmitDisplayAdded("ABC123", "Test Display")
+		}()
+	}
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			server.EmitDisplayRemoved("ABC123")
+		}()
+	}
+
+	// Concurrently call Stop
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = server.Stop()
+		}()
+	}
+
+	wg.Wait()
+	// If we get here without a race detector complaint, the test passes
+}

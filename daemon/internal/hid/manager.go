@@ -95,7 +95,9 @@ func (m *Manager) RefreshDisplays() error {
 	for serial, display := range m.displays {
 		if _, exists := currentSerials[serial]; !exists {
 			log.Info().Str("serial", serial).Msg("Display disconnected")
-			_ = display.Close()
+			if err := display.Close(); err != nil {
+				log.Warn().Err(err).Str("serial", serial).Msg("Failed to close disconnected display")
+			}
 			delete(m.displays, serial)
 		}
 	}

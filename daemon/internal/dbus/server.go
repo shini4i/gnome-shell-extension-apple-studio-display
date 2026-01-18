@@ -109,6 +109,7 @@ type DisplayInfo struct {
 // Thread safety:
 //   - The underlying Manager and Display types are individually thread-safe.
 //   - The connMu mutex protects the D-Bus connection field for signal emission.
+//   - The handlerMu mutex protects the deviceErrorHandler field.
 //   - Note: IncreaseBrightness and DecreaseBrightness perform non-atomic
 //     read-modify-write operations. Concurrent calls may result in missed
 //     increments. This is acceptable for typical keyboard shortcut usage.
@@ -117,6 +118,7 @@ type Server struct {
 	connMu             sync.RWMutex // Protects conn field only
 	manager            DisplayManager
 	rateLimiter        *rate.Limiter
+	handlerMu          sync.RWMutex // Protects deviceErrorHandler
 	deviceErrorHandler DeviceErrorHandler
 }
 
@@ -130,26 +132,35 @@ func NewServer(manager DisplayManager) *Server {
 
 // Start connects to the session bus and exports the service.
 func (s *Server) Start() error {
-	var err error
-	s.conn, err = dbus.ConnectSessionBus()
+	conn, err := dbus.ConnectSessionBus()
 	if err != nil {
 		return fmt.Errorf("failed to connect to session bus: %w", err)
 	}
 
+	// Ensure connection is closed if setup fails
+	success := false
+	defer func() {
+		if !success {
+			if closeErr := conn.Close(); closeErr != nil {
+				log.Error().Err(closeErr).Msg("Failed to close D-Bus connection during cleanup")
+			}
+		}
+	}()
+
 	// Export the server object
-	err = s.conn.Export(s, ObjectPath, InterfaceName)
+	err = conn.Export(s, ObjectPath, InterfaceName)
 	if err != nil {
 		return fmt.Errorf("failed to export server: %w", err)
 	}
 
 	// Export introspectable interface
-	err = s.conn.Export(introspect.Introspectable(IntrospectXML), ObjectPath, "org.freedesktop.DBus.Introspectable")
+	err = conn.Export(introspect.Introspectable(IntrospectXML), ObjectPath, "org.freedesktop.DBus.Introspectable")
 	if err != nil {
 		return fmt.Errorf("failed to export introspectable: %w", err)
 	}
 
 	// Request the service name
-	reply, err := s.conn.RequestName(ServiceName, dbus.NameFlagDoNotQueue)
+	reply, err := conn.RequestName(ServiceName, dbus.NameFlagDoNotQueue)
 	if err != nil {
 		return fmt.Errorf("failed to request name: %w", err)
 	}
@@ -157,14 +168,25 @@ func (s *Server) Start() error {
 		return fmt.Errorf("name %s already taken", ServiceName)
 	}
 
+	// Store connection with mutex protection
+	s.connMu.Lock()
+	s.conn = conn
+	s.connMu.Unlock()
+
+	success = true
 	log.Info().Str("service", ServiceName).Msg("D-Bus service started")
 	return nil
 }
 
 // Stop disconnects from the session bus.
 func (s *Server) Stop() error {
-	if s.conn != nil {
-		return s.conn.Close()
+	s.connMu.Lock()
+	conn := s.conn
+	s.conn = nil
+	s.connMu.Unlock()
+
+	if conn != nil {
+		return conn.Close()
 	}
 	return nil
 }
@@ -173,9 +195,10 @@ func (s *Server) Stop() error {
 // This is typically used to trigger recovery actions like re-enumerating displays
 // when a device is found to be disconnected during brightness operations.
 //
-// IMPORTANT: This method is NOT thread-safe and MUST be called before Start().
-// Once the server is started, the handler should not be modified.
+// This method is thread-safe and can be called at any time.
 func (s *Server) SetDeviceErrorHandler(handler DeviceErrorHandler) {
+	s.handlerMu.Lock()
+	defer s.handlerMu.Unlock()
 	s.deviceErrorHandler = handler
 }
 
@@ -191,9 +214,13 @@ func (s *Server) handleDeviceError(serial string, err error) bool {
 		Str("serial", serial).
 		Msg("Device error detected, triggering recovery")
 
-	if s.deviceErrorHandler != nil {
+	s.handlerMu.RLock()
+	handler := s.deviceErrorHandler
+	s.handlerMu.RUnlock()
+
+	if handler != nil {
 		// Run recovery asynchronously to not block the D-Bus response
-		go s.deviceErrorHandler(serial, err)
+		go handler(serial, err)
 	}
 
 	return true

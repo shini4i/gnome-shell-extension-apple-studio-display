@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/signal"
 	"sync"
@@ -96,29 +97,96 @@ func run() {
 	log.Info().Msg("Daemon running, press Ctrl+C to stop")
 	<-sigChan
 
-	// Cleanup
+	// Graceful shutdown with timeout
 	log.Info().Msg("Shutting down...")
-	if err := monitor.Stop(); err != nil {
-		log.Error().Err(err).Msg("Failed to stop udev monitor")
-	}
-	if err := server.Stop(); err != nil {
-		log.Error().Err(err).Msg("Failed to stop D-Bus server")
-	}
-	if err := manager.Close(); err != nil {
-		log.Error().Err(err).Msg("Failed to close display manager")
-	}
 
-	log.Info().Msg("Daemon stopped")
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		if err := monitor.Stop(); err != nil {
+			log.Error().Err(err).Msg("Failed to stop udev monitor")
+		}
+		if err := server.Stop(); err != nil {
+			log.Error().Err(err).Msg("Failed to stop D-Bus server")
+		}
+		if err := manager.Close(); err != nil {
+			log.Error().Err(err).Msg("Failed to close display manager")
+		}
+		close(shutdownDone)
+	}()
+
+	select {
+	case <-shutdownDone:
+		log.Info().Msg("Daemon stopped gracefully")
+	case <-ctx.Done():
+		log.Warn().Dur("timeout", shutdownTimeout).Msg("Shutdown timed out, forcing exit")
+	}
 }
 
 // refreshMu serializes display refresh operations to prevent race conditions
 // between hotplug handlers and recovery handlers.
+//
+// Design rationale: This is package-level because:
+// 1. The daemon is a single-instance application (only one run() execution)
+// 2. The mutex is shared by closures created in createHotplugHandler,
+//    createDeviceErrorHandler, and createRecoveryHandler
+// 3. Encapsulating in a struct would add complexity without benefit for this use case
+// 4. The handlers need to coordinate access to the shared Manager state
 var refreshMu sync.Mutex
 
 const (
 	// maxBackoffDuration caps the exponential backoff to prevent excessive waits.
 	maxBackoffDuration = 16 * time.Second
+
+	// shutdownTimeout is the maximum time to wait for graceful shutdown.
+	shutdownTimeout = 10 * time.Second
 )
+
+// displayChanges represents changes detected during a display refresh.
+type displayChanges struct {
+	added   []hid.DeviceInfo // displays that were added
+	removed []string         // serials of displays that were removed
+}
+
+// getDisplaysSnapshot returns a map of serial -> DeviceInfo for current displays.
+func getDisplaysSnapshot(manager *hid.Manager) map[string]hid.DeviceInfo {
+	snapshot := make(map[string]hid.DeviceInfo)
+	for _, d := range manager.ListDisplays() {
+		snapshot[d.Serial] = d
+	}
+	return snapshot
+}
+
+// diffDisplays compares old and new snapshots and returns the changes.
+func diffDisplays(oldDisplays, newDisplays map[string]hid.DeviceInfo) displayChanges {
+	var changes displayChanges
+
+	for serial, info := range newDisplays {
+		if _, exists := oldDisplays[serial]; !exists {
+			changes.added = append(changes.added, info)
+		}
+	}
+
+	for serial := range oldDisplays {
+		if _, exists := newDisplays[serial]; !exists {
+			changes.removed = append(changes.removed, serial)
+		}
+	}
+
+	return changes
+}
+
+// emitDisplayChanges emits D-Bus signals for display changes.
+func emitDisplayChanges(server *dbus.Server, changes displayChanges) {
+	for _, info := range changes.added {
+		server.EmitDisplayAdded(info.Serial, info.Product)
+	}
+	for _, serial := range changes.removed {
+		server.EmitDisplayRemoved(serial)
+	}
+}
 
 // refreshDisplaysWithRetry attempts to refresh displays with exponential backoff.
 // It retries up to maxRetries times with exponentially increasing delays (1s, 2s, 4s, 8s, 16s).
@@ -182,11 +250,7 @@ func createHotplugHandler(manager *hid.Manager, server *dbus.Server) udev.EventH
 		refreshMu.Lock()
 		defer refreshMu.Unlock()
 
-		// Get the list of displays before refresh to detect changes
-		oldDisplays := make(map[string]hid.DeviceInfo)
-		for _, d := range manager.ListDisplays() {
-			oldDisplays[d.Serial] = d
-		}
+		oldDisplays := getDisplaysSnapshot(manager)
 
 		// For add events, wait for the device to fully initialize.
 		// USB devices need time to enumerate all interfaces before HID is accessible.
@@ -209,25 +273,9 @@ func createHotplugHandler(manager *hid.Manager, server *dbus.Server) udev.EventH
 			return
 		}
 
-		// Get the list of displays after refresh
-		newDisplays := make(map[string]hid.DeviceInfo)
-		for _, d := range manager.ListDisplays() {
-			newDisplays[d.Serial] = d
-		}
-
-		// Emit signals for added displays
-		for serial, info := range newDisplays {
-			if _, exists := oldDisplays[serial]; !exists {
-				server.EmitDisplayAdded(serial, info.Product)
-			}
-		}
-
-		// Emit signals for removed displays
-		for serial := range oldDisplays {
-			if _, exists := newDisplays[serial]; !exists {
-				server.EmitDisplayRemoved(serial)
-			}
-		}
+		newDisplays := getDisplaysSnapshot(manager)
+		changes := diffDisplays(oldDisplays, newDisplays)
+		emitDisplayChanges(server, changes)
 	}
 }
 
@@ -246,11 +294,7 @@ func createDeviceErrorHandler(manager *hid.Manager, server *dbus.Server) dbus.De
 			Err(err).
 			Msg("Device error recovery: refreshing displays")
 
-		// Get current displays before refresh
-		oldDisplays := make(map[string]hid.DeviceInfo)
-		for _, d := range manager.ListDisplays() {
-			oldDisplays[d.Serial] = d
-		}
+		oldDisplays := getDisplaysSnapshot(manager)
 
 		// Refresh displays to clean up stale entries and find new ones
 		if refreshErr := manager.RefreshDisplays(); refreshErr != nil {
@@ -258,26 +302,18 @@ func createDeviceErrorHandler(manager *hid.Manager, server *dbus.Server) dbus.De
 			return
 		}
 
-		// Get displays after refresh
-		newDisplays := make(map[string]hid.DeviceInfo)
-		for _, d := range manager.ListDisplays() {
-			newDisplays[d.Serial] = d
+		newDisplays := getDisplaysSnapshot(manager)
+		changes := diffDisplays(oldDisplays, newDisplays)
+
+		// Log changes for debugging
+		for _, info := range changes.added {
+			log.Info().Str("serial", info.Serial).Msg("Device error recovery: display found")
+		}
+		for _, removedSerial := range changes.removed {
+			log.Info().Str("serial", removedSerial).Msg("Device error recovery: display removed")
 		}
 
-		// Emit signals for changes
-		for serial, info := range newDisplays {
-			if _, exists := oldDisplays[serial]; !exists {
-				log.Info().Str("serial", serial).Msg("Device error recovery: display found")
-				server.EmitDisplayAdded(serial, info.Product)
-			}
-		}
-
-		for serial := range oldDisplays {
-			if _, exists := newDisplays[serial]; !exists {
-				log.Info().Str("serial", serial).Msg("Device error recovery: display removed")
-				server.EmitDisplayRemoved(serial)
-			}
-		}
+		emitDisplayChanges(server, changes)
 
 		log.Info().
 			Int("before", len(oldDisplays)).
@@ -297,11 +333,7 @@ func createRecoveryHandler(manager *hid.Manager, server *dbus.Server) udev.Recov
 
 		log.Info().Msg("Performing recovery refresh after netlink buffer overflow")
 
-		// Get current displays before refresh
-		oldDisplays := make(map[string]hid.DeviceInfo)
-		for _, d := range manager.ListDisplays() {
-			oldDisplays[d.Serial] = d
-		}
+		oldDisplays := getDisplaysSnapshot(manager)
 
 		// Wait for USB operations to settle - USB-C dock connected displays
 		// may take several seconds for HID interfaces to become ready
@@ -321,26 +353,18 @@ func createRecoveryHandler(manager *hid.Manager, server *dbus.Server) udev.Recov
 			return
 		}
 
-		// Get displays after refresh
-		newDisplays := make(map[string]hid.DeviceInfo)
-		for _, d := range manager.ListDisplays() {
-			newDisplays[d.Serial] = d
+		newDisplays := getDisplaysSnapshot(manager)
+		changes := diffDisplays(oldDisplays, newDisplays)
+
+		// Log changes for debugging
+		for _, info := range changes.added {
+			log.Info().Str("serial", info.Serial).Msg("Display found during recovery")
+		}
+		for _, removedSerial := range changes.removed {
+			log.Info().Str("serial", removedSerial).Msg("Display lost during recovery")
 		}
 
-		// Emit signals for any changes detected
-		for serial, info := range newDisplays {
-			if _, exists := oldDisplays[serial]; !exists {
-				log.Info().Str("serial", serial).Msg("Display found during recovery")
-				server.EmitDisplayAdded(serial, info.Product)
-			}
-		}
-
-		for serial := range oldDisplays {
-			if _, exists := newDisplays[serial]; !exists {
-				log.Info().Str("serial", serial).Msg("Display lost during recovery")
-				server.EmitDisplayRemoved(serial)
-			}
-		}
+		emitDisplayChanges(server, changes)
 
 		log.Info().Int("displays", len(newDisplays)).Msg("Recovery refresh completed")
 	}

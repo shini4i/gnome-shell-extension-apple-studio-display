@@ -17,9 +17,16 @@ tasks:
     cmds:
       - go build -o {{.BINARY_NAME}} ./cmd/asd-brightness-daemon
 
+  generate:
+    desc: Generate mocks and other code
+    dir: "{{.DAEMON_DIR}}"
+    cmds:
+      - go generate ./...
+
   test:
     desc: Run all tests
     dir: "{{.DAEMON_DIR}}"
+    deps: [generate]
     cmds:
       - go test ./...
 

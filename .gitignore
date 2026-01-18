@@ -1,42 +1,16 @@
-# Go binaries
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
+# Build artifacts
 /daemon/asd-brightness-daemon
 
-# Test binary
-*.test
-
-# Output of the go coverage tool
+# Go coverage
 *.out
 coverage.html
 
-# Go workspace file
-go.work
-go.work.sum
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
+# Generated mocks
+/daemon/internal/hid/mocks/
 
 # Nix
 result
 result-*
-
-# Node modules (extension development)
-node_modules/
-
-# Build artifacts
-dist/
-*.zip
 
 # Local development
 .direnv/

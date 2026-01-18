@@ -205,7 +205,8 @@ func isBufferOverflowError(err error) bool {
 		return true
 	}
 	// Fallback: check error message for non-wrapped cases from the udev library
-	return strings.Contains(err.Error(), "no buffer space available")
+	// Use case-insensitive matching for robustness
+	return strings.Contains(strings.ToLower(err.Error()), "no buffer space available")
 }
 
 // handleEvent processes a single udev event.

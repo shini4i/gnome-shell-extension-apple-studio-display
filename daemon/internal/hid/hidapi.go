@@ -49,21 +49,32 @@ func (d *HIDAPIDevice) Info() DeviceInfo {
 
 // EnumerateDisplays returns a list of all connected Apple Studio Displays.
 // Returns an error if device enumeration fails.
+// Note: Devices with empty serial numbers are skipped as they may be in a transitional
+// state during connect/disconnect and cannot be reliably identified or opened.
 func EnumerateDisplays() ([]DeviceInfo, error) {
 	var displays []DeviceInfo
 
 	err := hid.Enumerate(AppleVendorID, StudioDisplayProductID, func(info *hid.DeviceInfo) error {
-		if info.InterfaceNbr == BrightnessInterface {
-			displays = append(displays, DeviceInfo{
-				Path:         info.Path,
-				VendorID:     info.VendorID,
-				ProductID:    info.ProductID,
-				Serial:       info.SerialNbr,
-				Manufacturer: info.MfrStr,
-				Product:      info.ProductStr,
-				Interface:    info.InterfaceNbr,
-			})
+		// Skip devices that don't match the brightness interface
+		if info.InterfaceNbr != BrightnessInterface {
+			return nil
 		}
+
+		// Skip devices with empty serial numbers - these are in a transitional state
+		// during connect/disconnect and cannot be reliably used
+		if info.SerialNbr == "" {
+			return nil
+		}
+
+		displays = append(displays, DeviceInfo{
+			Path:         info.Path,
+			VendorID:     info.VendorID,
+			ProductID:    info.ProductID,
+			Serial:       info.SerialNbr,
+			Manufacturer: info.MfrStr,
+			Product:      info.ProductStr,
+			Interface:    info.InterfaceNbr,
+		})
 		return nil
 	})
 
@@ -81,6 +92,12 @@ func OpenDisplay(serial string) (*HIDAPIDevice, error) {
 
 	err := hid.Enumerate(AppleVendorID, StudioDisplayProductID, func(info *hid.DeviceInfo) error {
 		if info.InterfaceNbr != BrightnessInterface {
+			return nil
+		}
+
+		// Skip devices with empty serial numbers - these are in a transitional state
+		// during connect/disconnect and cannot be reliably used
+		if info.SerialNbr == "" {
 			return nil
 		}
 

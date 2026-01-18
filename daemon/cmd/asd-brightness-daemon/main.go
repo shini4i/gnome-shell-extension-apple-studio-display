@@ -274,13 +274,13 @@ func createHotplugHandler(manager *hid.Manager, server *dbus.Server) udev.EventH
 			return
 		}
 
-		// If no displays found, return early to avoid spurious DisplayRemoved events.
-		// When refresh fails to find displays, we can't reliably determine if displays
-		// were actually removed or if enumeration just failed temporarily.
-		if !found {
+		// For ADD events: if no displays found, HID interface may not be ready yet.
+		// Skip diff to avoid spurious DisplayRemoved events.
+		// For REMOVE events: always proceed with diff since the device is confirmed gone.
+		if !found && event.Type == udev.EventAdd {
 			log.Debug().
 				Int("previousCount", len(oldDisplays)).
-				Msg("No displays found after hot-plug event, skipping diff to avoid spurious events")
+				Msg("No displays found after add event, skipping diff (HID may not be ready)")
 			return
 		}
 
@@ -359,12 +359,14 @@ func createRecoveryHandler(manager *hid.Manager, server *dbus.Server) udev.Recov
 		}
 
 		// If no displays found, return early to avoid spurious DisplayRemoved events.
-		// When refresh fails to find displays, we can't reliably determine if displays
-		// were actually removed or if enumeration just failed temporarily.
+		// Recovery is triggered after buffer overflow - we don't know if we missed
+		// ADD or REMOVE events. If enumeration fails to find displays, don't emit
+		// events. The device error handler will catch stale handles when the user
+		// tries to control brightness on a disconnected display.
 		if !found {
 			log.Info().
 				Int("previousCount", len(oldDisplays)).
-				Msg("Recovery refresh completed, no displays found - skipping diff to avoid spurious events")
+				Msg("Recovery refresh found no displays, skipping diff to avoid spurious events")
 			return
 		}
 

@@ -20,8 +20,14 @@ const (
 )
 
 const (
-	// AppleVendorID is the USB vendor ID for Apple devices (udev format, no leading zero).
-	AppleVendorID = "5ac"
+	// AppleVendorIDPattern is a regex pattern matching Apple's USB vendor ID.
+	// Handles variations in how the kernel reports the vendor ID:
+	// - 5ac (standard lowercase)
+	// - 05ac (with leading zero)
+	// - 5AC, 05AC (uppercase variants)
+	// The optional leading zero (0?) and case-insensitive hex ([aA][cC]) ensure
+	// compatibility across different kernel versions and distributions.
+	AppleVendorIDPattern = "0?5[aA][cC]"
 
 	// StudioDisplayProductID is the USB product ID for Apple Studio Display.
 	StudioDisplayProductID = "1114"
@@ -150,7 +156,7 @@ func (m *Monitor) createMatcher() *netlink.RuleDefinitions {
 	removeAction := "remove"
 
 	// Pattern matches exactly: vendorId/productId/anything (anchored)
-	productPattern := fmt.Sprintf("^%s/%s/[^/]+$", AppleVendorID, StudioDisplayProductID)
+	productPattern := fmt.Sprintf("^%s/%s/[^/]+$", AppleVendorIDPattern, StudioDisplayProductID)
 
 	// Match USB subsystem events for Apple Studio Display
 	rules.AddRule(netlink.RuleDefinition{

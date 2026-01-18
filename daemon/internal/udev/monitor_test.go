@@ -45,7 +45,7 @@ func TestMonitor_StopWithoutStart(t *testing.T) {
 }
 
 func TestConstants(t *testing.T) {
-	assert.Equal(t, "5ac", AppleVendorID)
+	assert.Equal(t, "0?5[aA][cC]", AppleVendorIDPattern)
 	assert.Equal(t, "1114", StudioDisplayProductID)
 }
 
@@ -304,6 +304,55 @@ func TestMonitor_CreateMatcher(t *testing.T) {
 				},
 			},
 			expected: false,
+		},
+		// Vendor ID pattern variants - ensures cross-kernel compatibility
+		{
+			name: "matches vendor ID with leading zero (05ac)",
+			uevent: netlink.UEvent{
+				Action: netlink.ADD,
+				KObj:   "/devices/pci0000:00/usb1/1-1",
+				Env: map[string]string{
+					"SUBSYSTEM": "usb",
+					"PRODUCT":   "05ac/1114/157",
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "matches vendor ID uppercase (5AC)",
+			uevent: netlink.UEvent{
+				Action: netlink.ADD,
+				KObj:   "/devices/pci0000:00/usb1/1-1",
+				Env: map[string]string{
+					"SUBSYSTEM": "usb",
+					"PRODUCT":   "5AC/1114/157",
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "matches vendor ID uppercase with leading zero (05AC)",
+			uevent: netlink.UEvent{
+				Action: netlink.ADD,
+				KObj:   "/devices/pci0000:00/usb1/1-1",
+				Env: map[string]string{
+					"SUBSYSTEM": "usb",
+					"PRODUCT":   "05AC/1114/157",
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "matches vendor ID mixed case (5Ac)",
+			uevent: netlink.UEvent{
+				Action: netlink.ADD,
+				KObj:   "/devices/pci0000:00/usb1/1-1",
+				Env: map[string]string{
+					"SUBSYSTEM": "usb",
+					"PRODUCT":   "5Ac/1114/157",
+				},
+			},
+			expected: true,
 		},
 	}
 

@@ -26,6 +26,7 @@ RestrictSUIDSGID=true
 SystemCallArchitectures=native
 ProtectClock=true
 RestrictAddressFamilies=AF_UNIX AF_NETLINK
+IPAddressDeny=any
 CapabilityBoundingSet=
 AmbientCapabilities=
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 // Package dbus provides the D-Bus service implementation for Apple Studio Display brightness control.
 package dbus
 

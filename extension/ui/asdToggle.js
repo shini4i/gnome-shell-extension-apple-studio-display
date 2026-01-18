@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 /**
  * Quick Settings toggle menu for Apple Studio Display brightness control.
  *

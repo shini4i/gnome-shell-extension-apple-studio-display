@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 // Package udev provides hot-plug detection for Apple Studio Displays via netlink/udev events.
 package udev
 

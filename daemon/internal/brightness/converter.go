@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 // Package brightness provides utilities for converting between Apple Studio Display
 // brightness values (in nits) and user-friendly percentages.
 package brightness

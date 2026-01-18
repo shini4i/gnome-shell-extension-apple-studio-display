@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 // Package hid provides abstractions for interacting with Apple Studio Display hardware.
 package hid
 

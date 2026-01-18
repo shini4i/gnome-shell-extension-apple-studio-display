@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 // Package main provides the entry point for the Apple Studio Display brightness daemon.
 package main
 

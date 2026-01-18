@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 // hidapi.go provides the hidraw-based HID device implementation for Linux.
 package hid
 

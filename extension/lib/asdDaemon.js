@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 /**
  * D-Bus client wrapper for asd-brightness-daemon.
  *

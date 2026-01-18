@@ -7,13 +7,12 @@ if command -v udevadm >/dev/null 2>&1; then
     udevadm trigger --subsystem-match=hidraw
 fi
 
-# Add the installing user to the video group for hidraw access
+# Enable the user service for the installing user
 if [ -n "$SUDO_USER" ]; then
-    if ! id -nG "$SUDO_USER" | grep -qw video; then
-        usermod -aG video "$SUDO_USER"
-        echo "User '$SUDO_USER' has been added to the 'video' group."
-    else
-        echo "User '$SUDO_USER' is already in the 'video' group."
+    SUDO_UID=$(id -u "$SUDO_USER")
+    if [ -d "/run/user/$SUDO_UID" ]; then
+        sudo -u "$SUDO_USER" XDG_RUNTIME_DIR="/run/user/$SUDO_UID" \
+            systemctl --user enable asd-brightness.service || true
     fi
 fi
 
@@ -21,7 +20,8 @@ cat <<'EOF'
 ================================================================================
 Apple Studio Display Brightness Control installed successfully!
 
-NOTE: You need to log out and back in for the group change to take effect.
+Enable and start the daemon:
+    systemctl --user enable --now asd-brightness.service
 
 The GNOME extension will be available after restarting GNOME Shell:
     - Wayland: Log out and log back in

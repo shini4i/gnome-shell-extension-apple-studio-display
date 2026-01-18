@@ -21,7 +21,7 @@ nfpms:
     builds:
       - asd-brightness-daemon
     vendor: shini4i
-    maintainer: "shini4i <https://github.com/shini4i>"
+    maintainer: "Vadim Gedz <github@shini4i.dev>"
     description: "Apple Studio Display Brightness Control for GNOME"
     license: GPL-3.0
     formats:

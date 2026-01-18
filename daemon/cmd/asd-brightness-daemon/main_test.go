@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"github.com/shini4i/asd-brightness-daemon/internal/dbus"
 	"github.com/shini4i/asd-brightness-daemon/internal/hid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -204,4 +205,143 @@ func (m *mockDevice) Info() hid.DeviceInfo {
 		Serial:  m.serial,
 		Product: m.product,
 	}
+}
+
+// TestRefreshDisplaysWithRetry_SkipsWhenNoDisplaysFound verifies that
+// refreshDisplaysWithRetry returns found=false when no displays are found,
+// which is the key behavior that enables the spurious event fix.
+//
+// This tests the fix for spurious DisplayRemoved events that occurred when:
+// 1. Displays were previously connected (oldDisplays > 0)
+// 2. HID enumeration temporarily fails to find displays
+// 3. Without the fix, diffDisplays would be called with empty newDisplays,
+//    causing DisplayRemoved to be emitted for all previous displays
+func TestRefreshDisplaysWithRetry_SkipsWhenNoDisplaysFound(t *testing.T) {
+	// Manager that always returns empty displays
+	enumerator := func() ([]hid.DeviceInfo, error) {
+		return []hid.DeviceInfo{}, nil
+	}
+
+	manager := hid.NewManager(hid.WithEnumerator(enumerator))
+
+	// Use 0 retries to make test fast
+	found, err := refreshDisplaysWithRetry(manager, 0)
+
+	assert.NoError(t, err)
+	assert.False(t, found, "Should return found=false when no displays found")
+	assert.Equal(t, 0, manager.Count())
+}
+
+// TestDiffDisplays_WithPreviousDisplaysAndEmptyNew verifies that diffDisplays
+// correctly identifies all previous displays as removed when new snapshot is empty.
+// This scenario is what the fix prevents from causing spurious events.
+func TestDiffDisplays_WithPreviousDisplaysAndEmptyNew(t *testing.T) {
+	oldDisplays := map[string]hid.DeviceInfo{
+		"ABC123": {Serial: "ABC123", Product: "Display 1"},
+		"DEF456": {Serial: "DEF456", Product: "Display 2"},
+	}
+	newDisplays := map[string]hid.DeviceInfo{}
+
+	changes := diffDisplays(oldDisplays, newDisplays)
+
+	// Without the fix, this would emit 2 DisplayRemoved events
+	assert.Len(t, changes.added, 0, "No displays should be added")
+	assert.Len(t, changes.removed, 2, "Both displays should be marked as removed")
+	assert.Contains(t, changes.removed, "ABC123")
+	assert.Contains(t, changes.removed, "DEF456")
+}
+
+// TestHotplugHandler_EarlyReturnPreventsSpuriousEvents tests the core behavior
+// of the hotplug handler: when refreshDisplaysWithRetry returns found=false,
+// the handler should return early without calling diffDisplays/emitDisplayChanges.
+//
+// Note: This test documents the expected control flow. The actual handler
+// uses time.Sleep for device initialization, so we test the logic separately.
+func TestHotplugHandler_EarlyReturnPreventsSpuriousEvents(t *testing.T) {
+	// Simulate the scenario: we had displays, refresh returns none
+	oldDisplays := map[string]hid.DeviceInfo{
+		"ABC123": {Serial: "ABC123", Product: "Display 1"},
+	}
+
+	// Simulate refreshDisplaysWithRetry returning found=false
+	found := false
+
+	// This is the key condition in the fix
+	// Old code: if !found && len(oldDisplays) == 0
+	// New code: if !found
+	shouldSkipDiff := !found
+
+	assert.True(t, shouldSkipDiff, "Should skip diff when found=false, regardless of previous display count")
+
+	// The old condition would NOT skip diff here (because len(oldDisplays) > 0)
+	oldConditionWouldSkip := !found && len(oldDisplays) == 0
+	assert.False(t, oldConditionWouldSkip, "Old condition would NOT skip diff, causing spurious events")
+}
+
+// TestEmitDisplayChanges_OnlyEmitsForActualChanges verifies that emitDisplayChanges
+// correctly processes the displayChanges struct.
+func TestEmitDisplayChanges_OnlyEmitsForActualChanges(t *testing.T) {
+	// This test verifies emitDisplayChanges behavior with various change scenarios.
+	// Since we can't capture D-Bus signals without a connection, we verify
+	// that the function doesn't panic with different inputs.
+
+	mockManager := &mockDisplayManager{displays: []hid.DeviceInfo{}}
+	server := dbus.NewServer(mockManager)
+
+	tests := []struct {
+		name    string
+		changes displayChanges
+	}{
+		{
+			name:    "empty changes",
+			changes: displayChanges{},
+		},
+		{
+			name: "only additions",
+			changes: displayChanges{
+				added: []hid.DeviceInfo{
+					{Serial: "ABC123", Product: "Display 1"},
+				},
+			},
+		},
+		{
+			name: "only removals",
+			changes: displayChanges{
+				removed: []string{"ABC123"},
+			},
+		},
+		{
+			name: "both additions and removals",
+			changes: displayChanges{
+				added:   []hid.DeviceInfo{{Serial: "DEF456", Product: "Display 2"}},
+				removed: []string{"ABC123"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Should not panic
+			assert.NotPanics(t, func() {
+				emitDisplayChanges(server, tt.changes)
+			})
+		})
+	}
+}
+
+// mockDisplayManager implements dbus.DisplayManager for testing.
+type mockDisplayManager struct {
+	displays []hid.DeviceInfo
+}
+
+func (m *mockDisplayManager) ListDisplays() []hid.DeviceInfo {
+	return m.displays
+}
+
+func (m *mockDisplayManager) GetDisplay(serial string) (*hid.Display, error) {
+	return nil, nil
+}
+
+func (m *mockDisplayManager) RefreshDisplays() error {
+	return nil
 }

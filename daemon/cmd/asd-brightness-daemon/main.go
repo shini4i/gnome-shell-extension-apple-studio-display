@@ -274,10 +274,13 @@ func createHotplugHandler(manager *hid.Manager, server *dbus.Server) udev.EventH
 			return
 		}
 
-		// If no displays found and no error, log and return early
-		// Don't emit spurious DisplayRemoved events when we simply couldn't find displays
-		if !found && len(oldDisplays) == 0 {
-			log.Debug().Msg("No displays found after hot-plug event, nothing to update")
+		// If no displays found, return early to avoid spurious DisplayRemoved events.
+		// When refresh fails to find displays, we can't reliably determine if displays
+		// were actually removed or if enumeration just failed temporarily.
+		if !found {
+			log.Debug().
+				Int("previousCount", len(oldDisplays)).
+				Msg("No displays found after hot-plug event, skipping diff to avoid spurious events")
 			return
 		}
 
@@ -355,9 +358,13 @@ func createRecoveryHandler(manager *hid.Manager, server *dbus.Server) udev.Recov
 			return
 		}
 
-		// If no displays found and none existed before, nothing to do
-		if !found && len(oldDisplays) == 0 {
-			log.Info().Msg("Recovery refresh completed, no displays found")
+		// If no displays found, return early to avoid spurious DisplayRemoved events.
+		// When refresh fails to find displays, we can't reliably determine if displays
+		// were actually removed or if enumeration just failed temporarily.
+		if !found {
+			log.Info().
+				Int("previousCount", len(oldDisplays)).
+				Msg("Recovery refresh completed, no displays found - skipping diff to avoid spurious events")
 			return
 		}
 

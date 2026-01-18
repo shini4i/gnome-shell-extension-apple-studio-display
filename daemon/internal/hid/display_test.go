@@ -2,6 +2,8 @@ package hid_test
 
 import (
 	"errors"
+	"fmt"
+	"syscall"
 	"testing"
 
 	"github.com/shini4i/asd-brightness-daemon/internal/hid"
@@ -276,4 +278,80 @@ func TestDisplay_Close_Idempotent(t *testing.T) {
 	// Second close should be no-op
 	err = display.Close()
 	require.NoError(t, err)
+}
+
+func TestIsDeviceGoneError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "nil error returns false",
+			err:      nil,
+			expected: false,
+		},
+		{
+			name:     "ENODEV syscall error returns true",
+			err:      syscall.ENODEV,
+			expected: true,
+		},
+		{
+			name:     "wrapped ENODEV returns true",
+			err:      fmt.Errorf("failed to send feature report: %w", syscall.ENODEV),
+			expected: true,
+		},
+		{
+			name:     "ENOENT syscall error returns true",
+			err:      syscall.ENOENT,
+			expected: true,
+		},
+		{
+			name:     "EIO syscall error returns true",
+			err:      syscall.EIO,
+			expected: true,
+		},
+		{
+			name:     "error containing 'No such device' returns true",
+			err:      errors.New("ioctl (GFEATURE): No such device"),
+			expected: true,
+		},
+		{
+			name:     "error containing 'no such device' (lowercase) returns true",
+			err:      errors.New("failed: no such device found"),
+			expected: true,
+		},
+		{
+			name:     "error containing 'No such file or directory' returns true",
+			err:      errors.New("open /dev/hidraw5: No such file or directory"),
+			expected: true,
+		},
+		{
+			name:     "error containing 'bad file descriptor' returns true",
+			err:      errors.New("write: bad file descriptor"),
+			expected: true,
+		},
+		{
+			name:     "generic error returns false",
+			err:      errors.New("some other error"),
+			expected: false,
+		},
+		{
+			name:     "permission denied returns false",
+			err:      syscall.EACCES,
+			expected: false,
+		},
+		{
+			name:     "timeout error returns false",
+			err:      errors.New("operation timed out"),
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := hid.IsDeviceGoneError(tt.err)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
 }

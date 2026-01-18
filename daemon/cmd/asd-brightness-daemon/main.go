@@ -79,6 +79,9 @@ func run() {
 		log.Fatal().Err(err).Msg("Failed to start D-Bus server")
 	}
 
+	// Set up device error recovery handler
+	server.SetDeviceErrorHandler(createDeviceErrorHandler(manager, server))
+
 	// Initialize udev monitor for hot-plug detection
 	monitor := udev.NewMonitor(createHotplugHandler(manager, server))
 	monitor.SetRecoveryHandler(createRecoveryHandler(manager, server))
@@ -225,6 +228,61 @@ func createHotplugHandler(manager *hid.Manager, server *dbus.Server) udev.EventH
 				server.EmitDisplayRemoved(serial)
 			}
 		}
+	}
+}
+
+// createDeviceErrorHandler returns a handler for device errors detected during brightness operations.
+// When a stale device handle is detected (e.g., "No such device" error), this triggers a display
+// refresh to clean up disconnected displays and discover any newly connected ones.
+// This handles the edge case where disconnect events were missed (e.g., during system suspend).
+func createDeviceErrorHandler(manager *hid.Manager, server *dbus.Server) dbus.DeviceErrorHandler {
+	return func(serial string, err error) {
+		// Use shared mutex to serialize with hotplug and recovery handlers
+		refreshMu.Lock()
+		defer refreshMu.Unlock()
+
+		log.Info().
+			Str("serial", serial).
+			Err(err).
+			Msg("Device error recovery: refreshing displays")
+
+		// Get current displays before refresh
+		oldDisplays := make(map[string]hid.DeviceInfo)
+		for _, d := range manager.ListDisplays() {
+			oldDisplays[d.Serial] = d
+		}
+
+		// Refresh displays to clean up stale entries and find new ones
+		if refreshErr := manager.RefreshDisplays(); refreshErr != nil {
+			log.Error().Err(refreshErr).Msg("Device error recovery: refresh failed")
+			return
+		}
+
+		// Get displays after refresh
+		newDisplays := make(map[string]hid.DeviceInfo)
+		for _, d := range manager.ListDisplays() {
+			newDisplays[d.Serial] = d
+		}
+
+		// Emit signals for changes
+		for serial, info := range newDisplays {
+			if _, exists := oldDisplays[serial]; !exists {
+				log.Info().Str("serial", serial).Msg("Device error recovery: display found")
+				server.EmitDisplayAdded(serial, info.Product)
+			}
+		}
+
+		for serial := range oldDisplays {
+			if _, exists := newDisplays[serial]; !exists {
+				log.Info().Str("serial", serial).Msg("Device error recovery: display removed")
+				server.EmitDisplayRemoved(serial)
+			}
+		}
+
+		log.Info().
+			Int("before", len(oldDisplays)).
+			Int("after", len(newDisplays)).
+			Msg("Device error recovery completed")
 	}
 }
 

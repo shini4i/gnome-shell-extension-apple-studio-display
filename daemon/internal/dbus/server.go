@@ -93,6 +93,10 @@ type DisplayManager interface {
 	RefreshDisplays() error
 }
 
+// DeviceErrorHandler is called when a device error (e.g., device disconnected) is detected.
+// This allows the caller to trigger recovery actions like re-enumerating displays.
+type DeviceErrorHandler func(serial string, err error)
+
 // DisplayInfo represents display information returned via D-Bus.
 // Serializes to D-Bus type (ss) - a struct containing serial and product name.
 type DisplayInfo struct {
@@ -109,10 +113,11 @@ type DisplayInfo struct {
 //     read-modify-write operations. Concurrent calls may result in missed
 //     increments. This is acceptable for typical keyboard shortcut usage.
 type Server struct {
-	conn        *dbus.Conn
-	connMu      sync.RWMutex // Protects conn field only
-	manager     DisplayManager
-	rateLimiter *rate.Limiter
+	conn               *dbus.Conn
+	connMu             sync.RWMutex // Protects conn field only
+	manager            DisplayManager
+	rateLimiter        *rate.Limiter
+	deviceErrorHandler DeviceErrorHandler
 }
 
 // NewServer creates a new D-Bus server with the given display manager.
@@ -164,6 +169,36 @@ func (s *Server) Stop() error {
 	return nil
 }
 
+// SetDeviceErrorHandler sets the callback invoked when device errors are detected.
+// This is typically used to trigger recovery actions like re-enumerating displays
+// when a device is found to be disconnected during brightness operations.
+//
+// IMPORTANT: This method is NOT thread-safe and MUST be called before Start().
+// Once the server is started, the handler should not be modified.
+func (s *Server) SetDeviceErrorHandler(handler DeviceErrorHandler) {
+	s.deviceErrorHandler = handler
+}
+
+// handleDeviceError checks if the error indicates a disconnected device and triggers recovery.
+// Returns true if the error was a device error and recovery was triggered.
+func (s *Server) handleDeviceError(serial string, err error) bool {
+	if err == nil || !hid.IsDeviceGoneError(err) {
+		return false
+	}
+
+	log.Warn().
+		Err(err).
+		Str("serial", serial).
+		Msg("Device error detected, triggering recovery")
+
+	if s.deviceErrorHandler != nil {
+		// Run recovery asynchronously to not block the D-Bus response
+		go s.deviceErrorHandler(serial, err)
+	}
+
+	return true
+}
+
 // ListDisplays returns a list of all connected displays.
 // Returns an array of structs: [{Serial, ProductName}, ...]
 func (s *Server) ListDisplays() ([]DisplayInfo, *dbus.Error) {
@@ -191,6 +226,7 @@ func (s *Server) GetBrightness(serial string) (uint32, *dbus.Error) {
 
 	brightness, err := display.GetBrightness()
 	if err != nil {
+		s.handleDeviceError(serial, err)
 		log.Error().Err(err).Str("serial", serial).Msg("Failed to get brightness")
 		return 0, dbus.MakeFailedError(err)
 	}
@@ -222,6 +258,7 @@ func (s *Server) SetBrightness(serial string, brightness uint32) *dbus.Error {
 
 	err = display.SetBrightness(uint8(brightness))
 	if err != nil {
+		s.handleDeviceError(serial, err)
 		log.Error().Err(err).Str("serial", serial).Msg("Failed to set brightness")
 		return dbus.MakeFailedError(err)
 	}
@@ -252,6 +289,7 @@ func (s *Server) IncreaseBrightness(serial string, step uint32) *dbus.Error {
 
 	current, err := display.GetBrightness()
 	if err != nil {
+		s.handleDeviceError(serial, err)
 		return dbus.MakeFailedError(err)
 	}
 
@@ -262,6 +300,7 @@ func (s *Server) IncreaseBrightness(serial string, step uint32) *dbus.Error {
 
 	err = display.SetBrightness(uint8(newBrightness))
 	if err != nil {
+		s.handleDeviceError(serial, err)
 		return dbus.MakeFailedError(err)
 	}
 
@@ -289,6 +328,7 @@ func (s *Server) DecreaseBrightness(serial string, step uint32) *dbus.Error {
 
 	current, err := display.GetBrightness()
 	if err != nil {
+		s.handleDeviceError(serial, err)
 		return dbus.MakeFailedError(err)
 	}
 
@@ -301,6 +341,7 @@ func (s *Server) DecreaseBrightness(serial string, step uint32) *dbus.Error {
 
 	err = display.SetBrightness(uint8(newBrightness))
 	if err != nil {
+		s.handleDeviceError(serial, err)
 		return dbus.MakeFailedError(err)
 	}
 
@@ -331,6 +372,7 @@ func (s *Server) SetAllBrightness(brightness uint32) *dbus.Error {
 
 		err = display.SetBrightness(uint8(brightness))
 		if err != nil {
+			s.handleDeviceError(info.Serial, err)
 			log.Error().Err(err).Str("serial", info.Serial).Msg("Failed to set brightness")
 			continue
 		}

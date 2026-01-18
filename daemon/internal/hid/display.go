@@ -2,8 +2,11 @@ package hid
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/shini4i/asd-brightness-daemon/internal/brightness"
 )
@@ -117,4 +120,50 @@ func (d *Display) Close() error {
 
 	d.closed = true
 	return d.device.Close()
+}
+
+// IsDeviceGoneError checks if an error indicates that the HID device is no longer available.
+// This typically happens when a USB device is physically disconnected.
+// Common causes:
+//   - ENODEV (errno 19): Device has been removed
+//   - ENOENT (errno 2): Device node removed from /dev
+//   - EIO (errno 5): I/O error during device communication (often mid-disconnect)
+//   - "No such device": Device path no longer exists
+//   - "No such file or directory": Device node removed from /dev
+func IsDeviceGoneError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for ENODEV syscall error (device removed)
+	if errors.Is(err, syscall.ENODEV) {
+		return true
+	}
+
+	// Check for ENOENT (file/device node removed)
+	if errors.Is(err, syscall.ENOENT) {
+		return true
+	}
+
+	// Check for EIO (I/O error - common during device disconnect mid-operation)
+	if errors.Is(err, syscall.EIO) {
+		return true
+	}
+
+	// Fallback: check error message for common device-gone patterns
+	errMsg := strings.ToLower(err.Error())
+	deviceGonePatterns := []string{
+		"no such device",
+		"no such file or directory",
+		"device not configured",
+		"bad file descriptor",
+	}
+
+	for _, pattern := range deviceGonePatterns {
+		if strings.Contains(errMsg, pattern) {
+			return true
+		}
+	}
+
+	return false
 }

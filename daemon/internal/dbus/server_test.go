@@ -2,7 +2,10 @@ package dbus
 
 import (
 	"errors"
+	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/shini4i/asd-brightness-daemon/internal/hid"
 	"github.com/shini4i/asd-brightness-daemon/internal/hid/mocks"
@@ -366,4 +369,147 @@ func TestServer_RateLimiting(t *testing.T) {
 	}
 
 	assert.True(t, rateLimitHit, "Rate limiter should have been triggered")
+}
+
+func TestServer_SetDeviceErrorHandler(t *testing.T) {
+	manager := &mockDisplayManager{}
+	server := NewServer(manager)
+
+	// Initially nil
+	assert.Nil(t, server.deviceErrorHandler)
+
+	// Set handler
+	var handlerCalled bool
+	server.SetDeviceErrorHandler(func(serial string, err error) {
+		handlerCalled = true
+	})
+
+	assert.NotNil(t, server.deviceErrorHandler)
+
+	// Verify handler is stored correctly by calling it directly
+	server.deviceErrorHandler("test", errors.New("test error"))
+	assert.True(t, handlerCalled)
+}
+
+func TestServer_handleDeviceError_NilError(t *testing.T) {
+	manager := &mockDisplayManager{}
+	server := NewServer(manager)
+
+	handlerCalled := false
+	server.SetDeviceErrorHandler(func(serial string, err error) {
+		handlerCalled = true
+	})
+
+	// Nil error should return false and not call handler
+	triggered := server.handleDeviceError("ABC123", nil)
+	assert.False(t, triggered)
+
+	// Give async handler time to run (if it were called)
+	time.Sleep(10 * time.Millisecond)
+	assert.False(t, handlerCalled)
+}
+
+func TestServer_handleDeviceError_NonDeviceError(t *testing.T) {
+	manager := &mockDisplayManager{}
+	server := NewServer(manager)
+
+	handlerCalled := false
+	server.SetDeviceErrorHandler(func(serial string, err error) {
+		handlerCalled = true
+	})
+
+	// Generic error should return false and not call handler
+	triggered := server.handleDeviceError("ABC123", errors.New("random error"))
+	assert.False(t, triggered)
+
+	// Give async handler time to run (if it were called)
+	time.Sleep(10 * time.Millisecond)
+	assert.False(t, handlerCalled)
+}
+
+func TestServer_handleDeviceError_TriggersRecovery(t *testing.T) {
+	manager := &mockDisplayManager{}
+	server := NewServer(manager)
+
+	var mu sync.Mutex
+	var receivedSerial string
+	var receivedErr error
+	handlerCalled := make(chan struct{}, 1)
+
+	server.SetDeviceErrorHandler(func(serial string, err error) {
+		mu.Lock()
+		receivedSerial = serial
+		receivedErr = err
+		mu.Unlock()
+		handlerCalled <- struct{}{}
+	})
+
+	// ENODEV error should trigger handler
+	triggered := server.handleDeviceError("ABC123", syscall.ENODEV)
+	assert.True(t, triggered)
+
+	// Wait for async handler
+	select {
+	case <-handlerCalled:
+		mu.Lock()
+		assert.Equal(t, "ABC123", receivedSerial)
+		assert.Equal(t, syscall.ENODEV, receivedErr)
+		mu.Unlock()
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("handler was not called within timeout")
+	}
+}
+
+func TestServer_handleDeviceError_TriggersRecoveryForEIO(t *testing.T) {
+	manager := &mockDisplayManager{}
+	server := NewServer(manager)
+
+	handlerCalled := make(chan struct{}, 1)
+	server.SetDeviceErrorHandler(func(serial string, err error) {
+		handlerCalled <- struct{}{}
+	})
+
+	// EIO error should trigger handler
+	triggered := server.handleDeviceError("ABC123", syscall.EIO)
+	assert.True(t, triggered)
+
+	// Wait for async handler
+	select {
+	case <-handlerCalled:
+		// Success
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("handler was not called within timeout")
+	}
+}
+
+func TestServer_handleDeviceError_TriggersRecoveryForNoSuchDevice(t *testing.T) {
+	manager := &mockDisplayManager{}
+	server := NewServer(manager)
+
+	handlerCalled := make(chan struct{}, 1)
+	server.SetDeviceErrorHandler(func(serial string, err error) {
+		handlerCalled <- struct{}{}
+	})
+
+	// "No such device" error message should trigger handler
+	triggered := server.handleDeviceError("ABC123", errors.New("ioctl: No such device"))
+	assert.True(t, triggered)
+
+	// Wait for async handler
+	select {
+	case <-handlerCalled:
+		// Success
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("handler was not called within timeout")
+	}
+}
+
+func TestServer_handleDeviceError_NilHandler(t *testing.T) {
+	manager := &mockDisplayManager{}
+	server := NewServer(manager)
+	// Don't set a handler - deviceErrorHandler is nil
+
+	// Should return true (error detected) but not panic
+	triggered := server.handleDeviceError("ABC123", syscall.ENODEV)
+	assert.True(t, triggered)
 }

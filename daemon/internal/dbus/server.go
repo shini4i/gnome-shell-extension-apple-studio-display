@@ -19,6 +19,9 @@ var ErrEmptySerial = errors.New("serial cannot be empty")
 // ErrRateLimitExceeded is returned when brightness change requests exceed the rate limit.
 var ErrRateLimitExceeded = errors.New("rate limit exceeded")
 
+// ErrInvalidStep is returned when an invalid brightness step value is provided.
+var ErrInvalidStep = errors.New("step must be between 1 and 100")
+
 const (
 	// rateLimitPerSecond is the maximum number of brightness changes per second.
 	rateLimitPerSecond = 20
@@ -299,6 +302,7 @@ func (s *Server) SetBrightness(serial string, brightness uint32) *dbus.Error {
 }
 
 // IncreaseBrightness increases the brightness of a display by a step.
+// The step parameter must be between 1 and 100.
 func (s *Server) IncreaseBrightness(serial string, step uint32) *dbus.Error {
 	if !s.rateLimiter.Allow() {
 		log.Warn().Msg("Rate limit exceeded for IncreaseBrightness")
@@ -307,6 +311,10 @@ func (s *Server) IncreaseBrightness(serial string, step uint32) *dbus.Error {
 
 	if serial == "" {
 		return dbus.MakeFailedError(ErrEmptySerial)
+	}
+
+	if step == 0 || step > 100 {
+		return dbus.MakeFailedError(ErrInvalidStep)
 	}
 
 	display, err := s.manager.GetDisplay(serial)
@@ -338,6 +346,7 @@ func (s *Server) IncreaseBrightness(serial string, step uint32) *dbus.Error {
 }
 
 // DecreaseBrightness decreases the brightness of a display by a step.
+// The step parameter must be between 1 and 100.
 func (s *Server) DecreaseBrightness(serial string, step uint32) *dbus.Error {
 	if !s.rateLimiter.Allow() {
 		log.Warn().Msg("Rate limit exceeded for DecreaseBrightness")
@@ -346,6 +355,10 @@ func (s *Server) DecreaseBrightness(serial string, step uint32) *dbus.Error {
 
 	if serial == "" {
 		return dbus.MakeFailedError(ErrEmptySerial)
+	}
+
+	if step == 0 || step > 100 {
+		return dbus.MakeFailedError(ErrInvalidStep)
 	}
 
 	display, err := s.manager.GetDisplay(serial)

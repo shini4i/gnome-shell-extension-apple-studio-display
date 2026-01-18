@@ -11,17 +11,29 @@ import (
 	"github.com/shini4i/asd-brightness-daemon/internal/brightness"
 )
 
+// HID Feature Report Structure for Apple Studio Display Brightness Control
+//
+// The brightness is controlled via a 7-byte HID feature report with the following layout:
+//
+//	Byte 0:     Report ID (0x01)
+//	Bytes 1-4:  Brightness value in nits (little-endian uint32)
+//	Bytes 5-6:  Reserved/unused
+//
+// The brightness value is stored as an internal brightness unit (not a percentage).
+// Valid range is MinBrightness to MaxBrightness (see brightness package constants).
+// The daemon converts between internal units and percentage (0-100) for the D-Bus API.
 const (
-	// ReportID is the HID report ID for brightness control.
+	// ReportID is the HID report ID for brightness control (always 0x01).
 	ReportID byte = 0x01
 
-	// ReportSize is the size of the HID feature report in bytes.
+	// ReportSize is the total size of the HID feature report in bytes.
+	// Layout: [ReportID(1)] [Nits(4)] [Reserved(2)] = 7 bytes
 	ReportSize = 7
 
 	// ReportOffsetNits is the byte offset where the nits value starts in the HID report.
 	ReportOffsetNits = 1
 
-	// ReportLenNits is the length in bytes of the nits value in the HID report.
+	// ReportLenNits is the length in bytes of the nits value (little-endian uint32).
 	ReportLenNits = 4
 
 	// AppleVendorID is the USB vendor ID for Apple.
@@ -48,7 +60,7 @@ func NewDisplay(device Device) *Display {
 }
 
 // ErrDisplayClosed is returned when an operation is attempted on a closed display.
-var ErrDisplayClosed = fmt.Errorf("display is closed")
+var ErrDisplayClosed = errors.New("display is closed")
 
 // GetBrightness reads the current brightness from the display and returns it as a percentage (0-100).
 func (d *Display) GetBrightness() (uint8, error) {

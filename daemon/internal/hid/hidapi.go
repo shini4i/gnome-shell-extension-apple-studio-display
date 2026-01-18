@@ -1,3 +1,4 @@
+// hidapi.go provides the hidraw-based HID device implementation for Linux.
 package hid
 
 import (

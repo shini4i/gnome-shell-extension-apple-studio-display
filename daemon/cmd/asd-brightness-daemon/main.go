@@ -142,6 +142,14 @@ const (
 
 	// shutdownTimeout is the maximum time to wait for graceful shutdown.
 	shutdownTimeout = 10 * time.Second
+
+	// deviceInitializationDelay is the time to wait for a USB device to fully
+	// initialize after a hot-plug add event before attempting enumeration.
+	deviceInitializationDelay = 500 * time.Millisecond
+
+	// usbSettleTime is the time to wait for USB operations to settle during
+	// recovery after a netlink buffer overflow.
+	usbSettleTime = 2 * time.Second
 )
 
 // displayChanges represents changes detected during a display refresh.
@@ -256,7 +264,7 @@ func createHotplugHandler(manager *hid.Manager, server *dbus.Server) udev.EventH
 		// USB devices need time to enumerate all interfaces before HID is accessible.
 		// Remove events don't need this delay as the device is already gone.
 		if event.Type == udev.EventAdd {
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(deviceInitializationDelay)
 		}
 
 		// Refresh displays with retry logic for resilience
@@ -337,7 +345,7 @@ func createRecoveryHandler(manager *hid.Manager, server *dbus.Server) udev.Recov
 
 		// Wait for USB operations to settle - USB-C dock connected displays
 		// may take several seconds for HID interfaces to become ready
-		time.Sleep(2 * time.Second)
+		time.Sleep(usbSettleTime)
 
 		// Refresh with retry using exponential backoff
 		// Total max wait: 2s initial + 1s + 2s + 4s + 8s + 16s = ~33 seconds

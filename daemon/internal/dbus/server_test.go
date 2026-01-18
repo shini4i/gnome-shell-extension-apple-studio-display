@@ -198,6 +198,20 @@ func TestServer_IncreaseBrightness_EmptySerial(t *testing.T) {
 	assert.NotNil(t, err)
 }
 
+func TestServer_IncreaseBrightness_InvalidStep(t *testing.T) {
+	server := NewServer(&mockDisplayManager{})
+
+	// Step of 0 should be rejected
+	err := server.IncreaseBrightness("ABC123", 0)
+	assert.NotNil(t, err)
+	assert.Contains(t, err.Error(), "step must be between 1 and 100")
+
+	// Step over 100 should be rejected
+	err = server.IncreaseBrightness("ABC123", 101)
+	assert.NotNil(t, err)
+	assert.Contains(t, err.Error(), "step must be between 1 and 100")
+}
+
 func TestServer_IncreaseBrightness_ClampsAt100(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -257,6 +271,20 @@ func TestServer_DecreaseBrightness_EmptySerial(t *testing.T) {
 
 	err := server.DecreaseBrightness("", 10)
 	assert.NotNil(t, err)
+}
+
+func TestServer_DecreaseBrightness_InvalidStep(t *testing.T) {
+	server := NewServer(&mockDisplayManager{})
+
+	// Step of 0 should be rejected
+	err := server.DecreaseBrightness("ABC123", 0)
+	assert.NotNil(t, err)
+	assert.Contains(t, err.Error(), "step must be between 1 and 100")
+
+	// Step over 100 should be rejected
+	err = server.DecreaseBrightness("ABC123", 101)
+	assert.NotNil(t, err)
+	assert.Contains(t, err.Error(), "step must be between 1 and 100")
 }
 
 func TestServer_DecreaseBrightness_ClampsAt0(t *testing.T) {

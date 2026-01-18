@@ -13,6 +13,13 @@ import (
 )
 
 const (
+	// netlinkBufferSize is the receive buffer size for the netlink socket.
+	// A larger buffer prevents ENOBUFS errors during USB hot-plug events.
+	// USB hot-plug generates many netlink messages rapidly; 2MB handles typical scenarios.
+	netlinkBufferSize = 2 * 1024 * 1024 // 2 MB
+)
+
+const (
 	// AppleVendorID is the USB vendor ID for Apple devices (udev format, no leading zero).
 	AppleVendorID = "5ac"
 
@@ -81,6 +88,14 @@ func (m *Monitor) Start() error {
 	if err := m.conn.Connect(netlink.UdevEvent); err != nil {
 		m.conn = nil
 		return fmt.Errorf("failed to connect to netlink: %w", err)
+	}
+
+	// Increase socket receive buffer to prevent ENOBUFS during rapid USB hot-plug events
+	if err := setSocketBufferSize(m.conn.Fd, netlinkBufferSize); err != nil {
+		log.Warn().Err(err).Int("size", netlinkBufferSize).Msg("Failed to set netlink buffer size")
+		// Continue anyway - the default buffer may still work for most cases
+	} else {
+		log.Debug().Int("size", netlinkBufferSize).Msg("Netlink socket buffer size configured")
 	}
 
 	queue := make(chan netlink.UEvent)
@@ -193,6 +208,20 @@ func (m *Monitor) processEvents(queue chan netlink.UEvent, errs chan error) {
 			log.Error().Err(err).Msg("udev monitor error")
 		}
 	}
+}
+
+// setSocketBufferSize sets the receive buffer size for a socket.
+// It first tries SO_RCVBUFFORCE (requires CAP_NET_ADMIN), then falls back to SO_RCVBUF.
+func setSocketBufferSize(fd int, size int) error {
+	// Try SO_RCVBUFFORCE first - bypasses rmem_max limit (requires CAP_NET_ADMIN)
+	err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUFFORCE, size)
+	if err == nil {
+		return nil
+	}
+
+	// Fall back to SO_RCVBUF - limited by net.core.rmem_max sysctl
+	// The kernel will cap the value at rmem_max and double it internally
+	return syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, size)
 }
 
 // isBufferOverflowError checks if the error is a netlink buffer overflow (ENOBUFS).

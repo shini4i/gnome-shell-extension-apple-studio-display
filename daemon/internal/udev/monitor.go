@@ -270,13 +270,3 @@ func (m *Monitor) handleEvent(uevent netlink.UEvent) {
 		m.handler(Event{Type: eventType})
 	}
 }
-
-// IsStudioDisplayProduct checks if a PRODUCT string matches Apple Studio Display.
-func IsStudioDisplayProduct(product string) bool {
-	// PRODUCT format: "vendorId/productId/bcdDevice" (e.g., "5ac/1114/157")
-	parts := strings.Split(product, "/")
-	if len(parts) < 2 {
-		return false
-	}
-	return strings.EqualFold(parts[0], AppleVendorID) && parts[1] == StudioDisplayProductID
-}

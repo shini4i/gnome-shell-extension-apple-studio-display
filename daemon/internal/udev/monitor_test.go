@@ -10,57 +10,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestIsStudioDisplayProduct(t *testing.T) {
-	tests := []struct {
-		name     string
-		product  string
-		expected bool
-	}{
-		{
-			name:     "valid Apple Studio Display product string",
-			product:  "5ac/1114/157",
-			expected: true,
-		},
-		{
-			name:     "valid with uppercase vendor ID",
-			product:  "5AC/1114/100",
-			expected: true,
-		},
-		{
-			name:     "different Apple product",
-			product:  "5ac/8286/100",
-			expected: false,
-		},
-		{
-			name:     "non-Apple vendor",
-			product:  "1234/1114/100",
-			expected: false,
-		},
-		{
-			name:     "empty string",
-			product:  "",
-			expected: false,
-		},
-		{
-			name:     "malformed string",
-			product:  "5ac",
-			expected: false,
-		},
-		{
-			name:     "only vendor/product",
-			product:  "5ac/1114",
-			expected: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := IsStudioDisplayProduct(tt.product)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
 func TestNewMonitor(t *testing.T) {
 	handlerCalled := false
 	handler := func(event Event) {

@@ -2,17 +2,32 @@
 package udev
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/pilebones/go-udev/netlink"
 	"github.com/rs/zerolog/log"
 )
 
 const (
-	// AppleVendorID is the USB vendor ID for Apple devices (udev format, no leading zero).
-	AppleVendorID = "5ac"
+	// netlinkBufferSize is the receive buffer size for the netlink socket.
+	// A larger buffer prevents ENOBUFS errors during USB hot-plug events.
+	// USB hot-plug generates many netlink messages rapidly; 2MB handles typical scenarios.
+	netlinkBufferSize = 2 * 1024 * 1024 // 2 MB
+)
+
+const (
+	// AppleVendorIDPattern is a regex pattern matching Apple's USB vendor ID.
+	// Handles variations in how the kernel reports the vendor ID:
+	// - 5ac (standard lowercase)
+	// - 05ac (with leading zero)
+	// - 5AC, 05AC (uppercase variants)
+	// The optional leading zero (0?) and case-insensitive hex ([aA][cC]) ensure
+	// compatibility across different kernel versions and distributions.
+	AppleVendorIDPattern = "0?5[aA][cC]"
 
 	// StudioDisplayProductID is the USB product ID for Apple Studio Display.
 	StudioDisplayProductID = "1114"
@@ -36,13 +51,18 @@ type Event struct {
 // EventHandler is called when a device event occurs.
 type EventHandler func(event Event)
 
+// RecoveryHandler is called when the monitor recovers from an error condition
+// (e.g., netlink buffer overflow) and needs to trigger a refresh.
+type RecoveryHandler func()
+
 // Monitor watches for Apple Studio Display connect/disconnect events.
 type Monitor struct {
-	conn    *netlink.UEventConn
-	handler EventHandler
-	quit    chan struct{}
-	stopped bool
-	mu      sync.Mutex
+	conn            *netlink.UEventConn
+	handler         EventHandler
+	recoveryHandler RecoveryHandler
+	quit            chan struct{}
+	stopped         bool
+	mu              sync.Mutex
 }
 
 // NewMonitor creates a new udev monitor with the given event handler.
@@ -50,6 +70,14 @@ func NewMonitor(handler EventHandler) *Monitor {
 	return &Monitor{
 		handler: handler,
 	}
+}
+
+// SetRecoveryHandler sets the handler called when the monitor recovers from errors.
+// This should trigger a display refresh to recover from potentially missed events.
+func (m *Monitor) SetRecoveryHandler(handler RecoveryHandler) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.recoveryHandler = handler
 }
 
 // Start begins monitoring for device events.
@@ -66,6 +94,14 @@ func (m *Monitor) Start() error {
 	if err := m.conn.Connect(netlink.UdevEvent); err != nil {
 		m.conn = nil
 		return fmt.Errorf("failed to connect to netlink: %w", err)
+	}
+
+	// Increase socket receive buffer to prevent ENOBUFS during rapid USB hot-plug events
+	if err := setSocketBufferSize(m.conn.Fd, netlinkBufferSize); err != nil {
+		log.Warn().Err(err).Int("size", netlinkBufferSize).Msg("Failed to set netlink buffer size")
+		// Continue anyway - the default buffer may still work for most cases
+	} else {
+		log.Debug().Int("size", netlinkBufferSize).Msg("Netlink socket buffer size configured")
 	}
 
 	queue := make(chan netlink.UEvent)
@@ -120,7 +156,7 @@ func (m *Monitor) createMatcher() *netlink.RuleDefinitions {
 	removeAction := "remove"
 
 	// Pattern matches exactly: vendorId/productId/anything (anchored)
-	productPattern := fmt.Sprintf("^%s/%s/[^/]+$", AppleVendorID, StudioDisplayProductID)
+	productPattern := fmt.Sprintf("^%s/%s/[^/]+$", AppleVendorIDPattern, StudioDisplayProductID)
 
 	// Match USB subsystem events for Apple Studio Display
 	rules.AddRule(netlink.RuleDefinition{
@@ -158,20 +194,63 @@ func (m *Monitor) processEvents(queue chan netlink.UEvent, errs chan error) {
 			// Check if we're stopping
 			m.mu.Lock()
 			stopped := m.stopped
+			recoveryHandler := m.recoveryHandler
 			m.mu.Unlock()
 			if stopped {
 				return
 			}
+
+			// Handle netlink buffer overflow (ENOBUFS) gracefully.
+			// When this occurs, events may have been dropped, so we trigger
+			// a recovery refresh to re-enumerate displays.
+			if isBufferOverflowError(err) {
+				log.Warn().Msg("Netlink buffer overflow detected, triggering recovery refresh")
+				if recoveryHandler != nil {
+					go recoveryHandler()
+				}
+				continue
+			}
+
 			log.Error().Err(err).Msg("udev monitor error")
 		}
 	}
 }
 
+// setSocketBufferSize sets the receive buffer size for a socket.
+// It first tries SO_RCVBUFFORCE (requires CAP_NET_ADMIN), then falls back to SO_RCVBUF.
+func setSocketBufferSize(fd int, size int) error {
+	// Try SO_RCVBUFFORCE first - bypasses rmem_max limit (requires CAP_NET_ADMIN)
+	err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUFFORCE, size)
+	if err == nil {
+		return nil
+	}
+
+	// Fall back to SO_RCVBUF - limited by net.core.rmem_max sysctl
+	// The kernel will cap the value at rmem_max and double it internally
+	return syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, size)
+}
+
+// isBufferOverflowError checks if the error is a netlink buffer overflow (ENOBUFS).
+func isBufferOverflowError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Check for ENOBUFS using errors.Is for wrapped error support
+	if errors.Is(err, syscall.ENOBUFS) {
+		return true
+	}
+	// Fallback: check error message for non-wrapped cases from the udev library
+	// Use case-insensitive matching for robustness
+	return strings.Contains(strings.ToLower(err.Error()), "no buffer space available")
+}
+
 // handleEvent processes a single udev event.
 func (m *Monitor) handleEvent(uevent netlink.UEvent) {
-	// Filter for usb_device type only (not usb_interface)
+	// Filter for usb_device type only (not usb_interface) on ADD events.
+	// For REMOVE events, DEVTYPE may not be present since the device is already gone,
+	// so we skip this check. The matcher already ensures we only receive Studio Display events.
 	devtype := uevent.Env["DEVTYPE"]
-	if devtype != "usb_device" {
+	if uevent.Action == netlink.ADD && devtype != "usb_device" {
 		return
 	}
 
@@ -196,14 +275,4 @@ func (m *Monitor) handleEvent(uevent netlink.UEvent) {
 	if m.handler != nil {
 		m.handler(Event{Type: eventType})
 	}
-}
-
-// IsStudioDisplayProduct checks if a PRODUCT string matches Apple Studio Display.
-func IsStudioDisplayProduct(product string) bool {
-	// PRODUCT format: "vendorId/productId/bcdDevice" (e.g., "5ac/1114/157")
-	parts := strings.Split(product, "/")
-	if len(parts) < 2 {
-		return false
-	}
-	return strings.EqualFold(parts[0], AppleVendorID) && parts[1] == StudioDisplayProductID
 }

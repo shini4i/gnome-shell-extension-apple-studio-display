@@ -2,7 +2,10 @@ package dbus
 
 import (
 	"errors"
+	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/shini4i/asd-brightness-daemon/internal/hid"
 	"github.com/shini4i/asd-brightness-daemon/internal/hid/mocks"
@@ -57,9 +60,10 @@ func TestServer_ListDisplays(t *testing.T) {
 	result, err := server.ListDisplays()
 	require.Nil(t, err)
 	require.Len(t, result, 2)
-	assert.Equal(t, "ABC123", result[0][0])
-	assert.Equal(t, "Apple Studio Display", result[0][1])
-	assert.Equal(t, "DEF456", result[1][0])
+	assert.Equal(t, "ABC123", result[0].Serial)
+	assert.Equal(t, "Apple Studio Display", result[0].ProductName)
+	assert.Equal(t, "DEF456", result[1].Serial)
+	assert.Equal(t, "Apple Studio Display", result[1].ProductName)
 }
 
 func TestServer_ListDisplays_Empty(t *testing.T) {
@@ -194,6 +198,20 @@ func TestServer_IncreaseBrightness_EmptySerial(t *testing.T) {
 	assert.NotNil(t, err)
 }
 
+func TestServer_IncreaseBrightness_InvalidStep(t *testing.T) {
+	server := NewServer(&mockDisplayManager{})
+
+	// Step of 0 should be rejected
+	err := server.IncreaseBrightness("ABC123", 0)
+	assert.NotNil(t, err)
+	assert.Contains(t, err.Error(), "step must be between 1 and 100")
+
+	// Step over 100 should be rejected
+	err = server.IncreaseBrightness("ABC123", 101)
+	assert.NotNil(t, err)
+	assert.Contains(t, err.Error(), "step must be between 1 and 100")
+}
+
 func TestServer_IncreaseBrightness_ClampsAt100(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -253,6 +271,20 @@ func TestServer_DecreaseBrightness_EmptySerial(t *testing.T) {
 
 	err := server.DecreaseBrightness("", 10)
 	assert.NotNil(t, err)
+}
+
+func TestServer_DecreaseBrightness_InvalidStep(t *testing.T) {
+	server := NewServer(&mockDisplayManager{})
+
+	// Step of 0 should be rejected
+	err := server.DecreaseBrightness("ABC123", 0)
+	assert.NotNil(t, err)
+	assert.Contains(t, err.Error(), "step must be between 1 and 100")
+
+	// Step over 100 should be rejected
+	err = server.DecreaseBrightness("ABC123", 101)
+	assert.NotNil(t, err)
+	assert.Contains(t, err.Error(), "step must be between 1 and 100")
 }
 
 func TestServer_DecreaseBrightness_ClampsAt0(t *testing.T) {
@@ -365,4 +397,220 @@ func TestServer_RateLimiting(t *testing.T) {
 	}
 
 	assert.True(t, rateLimitHit, "Rate limiter should have been triggered")
+}
+
+func TestServer_SetDeviceErrorHandler(t *testing.T) {
+	manager := &mockDisplayManager{}
+	server := NewServer(manager)
+
+	// Initially nil
+	assert.Nil(t, server.deviceErrorHandler)
+
+	// Set handler
+	var handlerCalled bool
+	server.SetDeviceErrorHandler(func(serial string, err error) {
+		handlerCalled = true
+	})
+
+	assert.NotNil(t, server.deviceErrorHandler)
+
+	// Verify handler is stored correctly by calling it directly
+	server.deviceErrorHandler("test", errors.New("test error"))
+	assert.True(t, handlerCalled)
+}
+
+func TestServer_handleDeviceError_NilError(t *testing.T) {
+	manager := &mockDisplayManager{}
+	server := NewServer(manager)
+
+	handlerCalled := false
+	server.SetDeviceErrorHandler(func(serial string, err error) {
+		handlerCalled = true
+	})
+
+	// Nil error should return false and not call handler
+	triggered := server.handleDeviceError("ABC123", nil)
+	assert.False(t, triggered)
+
+	// Give async handler time to run (if it were called)
+	time.Sleep(10 * time.Millisecond)
+	assert.False(t, handlerCalled)
+}
+
+func TestServer_handleDeviceError_NonDeviceError(t *testing.T) {
+	manager := &mockDisplayManager{}
+	server := NewServer(manager)
+
+	handlerCalled := false
+	server.SetDeviceErrorHandler(func(serial string, err error) {
+		handlerCalled = true
+	})
+
+	// Generic error should return false and not call handler
+	triggered := server.handleDeviceError("ABC123", errors.New("random error"))
+	assert.False(t, triggered)
+
+	// Give async handler time to run (if it were called)
+	time.Sleep(10 * time.Millisecond)
+	assert.False(t, handlerCalled)
+}
+
+func TestServer_handleDeviceError_TriggersRecovery(t *testing.T) {
+	manager := &mockDisplayManager{}
+	server := NewServer(manager)
+
+	var mu sync.Mutex
+	var receivedSerial string
+	var receivedErr error
+	handlerCalled := make(chan struct{}, 1)
+
+	server.SetDeviceErrorHandler(func(serial string, err error) {
+		mu.Lock()
+		receivedSerial = serial
+		receivedErr = err
+		mu.Unlock()
+		handlerCalled <- struct{}{}
+	})
+
+	// ENODEV error should trigger handler
+	triggered := server.handleDeviceError("ABC123", syscall.ENODEV)
+	assert.True(t, triggered)
+
+	// Wait for async handler
+	select {
+	case <-handlerCalled:
+		mu.Lock()
+		assert.Equal(t, "ABC123", receivedSerial)
+		assert.Equal(t, syscall.ENODEV, receivedErr)
+		mu.Unlock()
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("handler was not called within timeout")
+	}
+}
+
+func TestServer_handleDeviceError_TriggersRecoveryForEIO(t *testing.T) {
+	manager := &mockDisplayManager{}
+	server := NewServer(manager)
+
+	handlerCalled := make(chan struct{}, 1)
+	server.SetDeviceErrorHandler(func(serial string, err error) {
+		handlerCalled <- struct{}{}
+	})
+
+	// EIO error should trigger handler
+	triggered := server.handleDeviceError("ABC123", syscall.EIO)
+	assert.True(t, triggered)
+
+	// Wait for async handler
+	select {
+	case <-handlerCalled:
+		// Success
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("handler was not called within timeout")
+	}
+}
+
+func TestServer_handleDeviceError_TriggersRecoveryForNoSuchDevice(t *testing.T) {
+	manager := &mockDisplayManager{}
+	server := NewServer(manager)
+
+	handlerCalled := make(chan struct{}, 1)
+	server.SetDeviceErrorHandler(func(serial string, err error) {
+		handlerCalled <- struct{}{}
+	})
+
+	// "No such device" error message should trigger handler
+	triggered := server.handleDeviceError("ABC123", errors.New("ioctl: No such device"))
+	assert.True(t, triggered)
+
+	// Wait for async handler
+	select {
+	case <-handlerCalled:
+		// Success
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("handler was not called within timeout")
+	}
+}
+
+func TestServer_handleDeviceError_NilHandler(t *testing.T) {
+	manager := &mockDisplayManager{}
+	server := NewServer(manager)
+	// Don't set a handler - deviceErrorHandler is nil
+
+	// Should return true (error detected) but not panic
+	triggered := server.handleDeviceError("ABC123", syscall.ENODEV)
+	assert.True(t, triggered)
+}
+
+// TestServer_ConcurrentSetDeviceErrorHandler tests that SetDeviceErrorHandler
+// is thread-safe when called concurrently with handleDeviceError.
+func TestServer_ConcurrentSetDeviceErrorHandler(t *testing.T) {
+	manager := &mockDisplayManager{}
+	server := NewServer(manager)
+
+	var wg sync.WaitGroup
+	const numGoroutines = 100
+
+	// Start goroutines that set the handler
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			server.SetDeviceErrorHandler(func(serial string, err error) {
+				// Handler body doesn't matter for this test
+			})
+		}(i)
+	}
+
+	// Concurrently call handleDeviceError
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			server.handleDeviceError("ABC123", syscall.ENODEV)
+		}()
+	}
+
+	wg.Wait()
+	// If we get here without a race detector complaint, the test passes
+}
+
+// TestServer_ConcurrentStopAndEmit tests that Stop and signal emission
+// methods don't race when called concurrently.
+func TestServer_ConcurrentStopAndEmit(t *testing.T) {
+	manager := &mockDisplayManager{}
+	server := NewServer(manager)
+	// Note: conn is nil, but we're testing mutex protection, not actual D-Bus calls
+
+	var wg sync.WaitGroup
+	const numGoroutines = 50
+
+	// Start goroutines that emit signals (conn is nil, so they return early)
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			server.EmitDisplayAdded("ABC123", "Test Display")
+		}()
+	}
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			server.EmitDisplayRemoved("ABC123")
+		}()
+	}
+
+	// Concurrently call Stop
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = server.Stop()
+		}()
+	}
+
+	wg.Wait()
+	// If we get here without a race detector complaint, the test passes
 }

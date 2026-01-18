@@ -1,14 +1,19 @@
+// hidapi.go provides the hidraw-based HID device implementation for Linux.
 package hid
 
 import (
+	"errors"
 	"fmt"
 
-	karalabehid "github.com/karalabe/hid"
+	hid "github.com/sstallion/go-hid"
 )
 
-// HIDAPIDevice wraps a karalabe/hid device to implement the Device interface.
+// errFound is a sentinel error used to stop enumeration early.
+var errFound = errors.New("found")
+
+// HIDAPIDevice wraps a sstallion/go-hid device to implement the Device interface.
 type HIDAPIDevice struct {
-	device karalabehid.Device // karalabe/hid.Device is an interface
+	device *hid.Device
 	info   DeviceInfo
 }
 
@@ -16,7 +21,7 @@ type HIDAPIDevice struct {
 var _ Device = (*HIDAPIDevice)(nil)
 
 // NewHIDAPIDevice creates a new HIDAPIDevice from an open hid.Device.
-func NewHIDAPIDevice(device karalabehid.Device, info DeviceInfo) *HIDAPIDevice {
+func NewHIDAPIDevice(device *hid.Device, info DeviceInfo) *HIDAPIDevice {
 	return &HIDAPIDevice{
 		device: device,
 		info:   info,
@@ -45,26 +50,37 @@ func (d *HIDAPIDevice) Info() DeviceInfo {
 
 // EnumerateDisplays returns a list of all connected Apple Studio Displays.
 // Returns an error if device enumeration fails.
+// Note: Devices with empty serial numbers are skipped as they may be in a transitional
+// state during connect/disconnect and cannot be reliably identified or opened.
 func EnumerateDisplays() ([]DeviceInfo, error) {
 	var displays []DeviceInfo
 
-	devices, err := karalabehid.Enumerate(AppleVendorID, StudioDisplayProductID)
+	err := hid.Enumerate(AppleVendorID, StudioDisplayProductID, func(info *hid.DeviceInfo) error {
+		// Skip devices that don't match the brightness interface
+		if info.InterfaceNbr != BrightnessInterface {
+			return nil
+		}
+
+		// Skip devices with empty serial numbers - these are in a transitional state
+		// during connect/disconnect and cannot be reliably used
+		if info.SerialNbr == "" {
+			return nil
+		}
+
+		displays = append(displays, DeviceInfo{
+			Path:         info.Path,
+			VendorID:     info.VendorID,
+			ProductID:    info.ProductID,
+			Serial:       info.SerialNbr,
+			Manufacturer: info.MfrStr,
+			Product:      info.ProductStr,
+			Interface:    info.InterfaceNbr,
+		})
+		return nil
+	})
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to enumerate HID devices: %w", err)
-	}
-
-	for _, device := range devices {
-		if device.Interface == BrightnessInterface {
-			displays = append(displays, DeviceInfo{
-				Path:         device.Path,
-				VendorID:     device.VendorID,
-				ProductID:    device.ProductID,
-				Serial:       device.Serial,
-				Manufacturer: device.Manufacturer,
-				Product:      device.Product,
-				Interface:    device.Interface,
-			})
-		}
 	}
 
 	return displays, nil
@@ -73,40 +89,52 @@ func EnumerateDisplays() ([]DeviceInfo, error) {
 // OpenDisplay opens a connection to an Apple Studio Display by serial number.
 // If serial is empty, opens the first available display.
 func OpenDisplay(serial string) (*HIDAPIDevice, error) {
-	devices, err := karalabehid.Enumerate(AppleVendorID, StudioDisplayProductID)
-	if err != nil {
+	var targetInfo *DeviceInfo
+
+	err := hid.Enumerate(AppleVendorID, StudioDisplayProductID, func(info *hid.DeviceInfo) error {
+		if info.InterfaceNbr != BrightnessInterface {
+			return nil
+		}
+
+		// Skip devices with empty serial numbers - these are in a transitional state
+		// during connect/disconnect and cannot be reliably used
+		if info.SerialNbr == "" {
+			return nil
+		}
+
+		if serial != "" && info.SerialNbr != serial {
+			return nil
+		}
+
+		targetInfo = &DeviceInfo{
+			Path:         info.Path,
+			VendorID:     info.VendorID,
+			ProductID:    info.ProductID,
+			Serial:       info.SerialNbr,
+			Manufacturer: info.MfrStr,
+			Product:      info.ProductStr,
+			Interface:    info.InterfaceNbr,
+		}
+		return errFound // Stop enumeration
+	})
+
+	// Check for real errors (not our sentinel)
+	if err != nil && !errors.Is(err, errFound) {
 		return nil, fmt.Errorf("failed to enumerate devices: %w", err)
 	}
 
-	for _, deviceInfo := range devices {
-		if deviceInfo.Interface != BrightnessInterface {
-			continue
+	if targetInfo == nil {
+		if serial != "" {
+			return nil, fmt.Errorf("display with serial %s not found", serial)
 		}
-
-		if serial != "" && deviceInfo.Serial != serial {
-			continue
-		}
-
-		device, err := deviceInfo.Open()
-		if err != nil {
-			return nil, fmt.Errorf("failed to open display %s: %w", deviceInfo.Serial, err)
-		}
-
-		info := DeviceInfo{
-			Path:         deviceInfo.Path,
-			VendorID:     deviceInfo.VendorID,
-			ProductID:    deviceInfo.ProductID,
-			Serial:       deviceInfo.Serial,
-			Manufacturer: deviceInfo.Manufacturer,
-			Product:      deviceInfo.Product,
-			Interface:    deviceInfo.Interface,
-		}
-
-		return NewHIDAPIDevice(device, info), nil
+		return nil, fmt.Errorf("no Apple Studio Display found")
 	}
 
-	if serial != "" {
-		return nil, fmt.Errorf("display with serial %s not found", serial)
+	// Open by path (sstallion/go-hid way)
+	device, err := hid.OpenPath(targetInfo.Path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open display %s: %w", targetInfo.Serial, err)
 	}
-	return nil, fmt.Errorf("no Apple Studio Display found")
+
+	return NewHIDAPIDevice(device, *targetInfo), nil
 }

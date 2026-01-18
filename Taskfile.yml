@@ -36,8 +36,36 @@ tasks:
     cmds:
       - ./{{.BINARY_NAME}} -v
 
+  test-race:
+    desc: Run all tests with race detector
+    dir: "{{.DAEMON_DIR}}"
+    cmds:
+      - go test -race ./...
+
+  lint:
+    desc: Run golangci-lint
+    dir: "{{.DAEMON_DIR}}"
+    cmds:
+      - golangci-lint run
+
+  coverage:
+    desc: Run tests with coverage report
+    dir: "{{.DAEMON_DIR}}"
+    cmds:
+      - go test -coverprofile=coverage.out ./...
+      - go tool cover -html=coverage.out -o coverage.html
+      - echo "Coverage report generated at {{.DAEMON_DIR}}/coverage.html"
+
+  coverage-summary:
+    desc: Show coverage summary in terminal
+    dir: "{{.DAEMON_DIR}}"
+    cmds:
+      - go test -coverprofile=coverage.out ./...
+      - go tool cover -func=coverage.out
+
   clean:
     desc: Clean build artifacts
     dir: "{{.DAEMON_DIR}}"
     cmds:
       - rm -f {{.BINARY_NAME}}
+      - rm -f coverage.out coverage.html

@@ -19,6 +19,9 @@ var ErrEmptySerial = errors.New("serial cannot be empty")
 // ErrRateLimitExceeded is returned when brightness change requests exceed the rate limit.
 var ErrRateLimitExceeded = errors.New("rate limit exceeded")
 
+// ErrInvalidStep is returned when an invalid brightness step value is provided.
+var ErrInvalidStep = errors.New("step must be between 1 and 100")
+
 const (
 	// rateLimitPerSecond is the maximum number of brightness changes per second.
 	rateLimitPerSecond = 20
@@ -93,19 +96,33 @@ type DisplayManager interface {
 	RefreshDisplays() error
 }
 
+// DeviceErrorHandler is called when a device error (e.g., device disconnected) is detected.
+// This allows the caller to trigger recovery actions like re-enumerating displays.
+type DeviceErrorHandler func(serial string, err error)
+
+// DisplayInfo represents display information returned via D-Bus.
+// Serializes to D-Bus type (ss) - a struct containing serial and product name.
+type DisplayInfo struct {
+	Serial      string
+	ProductName string
+}
+
 // Server implements the D-Bus service for brightness control.
 //
 // Thread safety:
 //   - The underlying Manager and Display types are individually thread-safe.
 //   - The connMu mutex protects the D-Bus connection field for signal emission.
+//   - The handlerMu mutex protects the deviceErrorHandler field.
 //   - Note: IncreaseBrightness and DecreaseBrightness perform non-atomic
 //     read-modify-write operations. Concurrent calls may result in missed
 //     increments. This is acceptable for typical keyboard shortcut usage.
 type Server struct {
-	conn        *dbus.Conn
-	connMu      sync.RWMutex // Protects conn field only
-	manager     DisplayManager
-	rateLimiter *rate.Limiter
+	conn               *dbus.Conn
+	connMu             sync.RWMutex // Protects conn field only
+	manager            DisplayManager
+	rateLimiter        *rate.Limiter
+	handlerMu          sync.RWMutex // Protects deviceErrorHandler
+	deviceErrorHandler DeviceErrorHandler
 }
 
 // NewServer creates a new D-Bus server with the given display manager.
@@ -118,26 +135,35 @@ func NewServer(manager DisplayManager) *Server {
 
 // Start connects to the session bus and exports the service.
 func (s *Server) Start() error {
-	var err error
-	s.conn, err = dbus.ConnectSessionBus()
+	conn, err := dbus.ConnectSessionBus()
 	if err != nil {
 		return fmt.Errorf("failed to connect to session bus: %w", err)
 	}
 
+	// Ensure connection is closed if setup fails
+	success := false
+	defer func() {
+		if !success {
+			if closeErr := conn.Close(); closeErr != nil {
+				log.Error().Err(closeErr).Msg("Failed to close D-Bus connection during cleanup")
+			}
+		}
+	}()
+
 	// Export the server object
-	err = s.conn.Export(s, ObjectPath, InterfaceName)
+	err = conn.Export(s, ObjectPath, InterfaceName)
 	if err != nil {
 		return fmt.Errorf("failed to export server: %w", err)
 	}
 
 	// Export introspectable interface
-	err = s.conn.Export(introspect.Introspectable(IntrospectXML), ObjectPath, "org.freedesktop.DBus.Introspectable")
+	err = conn.Export(introspect.Introspectable(IntrospectXML), ObjectPath, "org.freedesktop.DBus.Introspectable")
 	if err != nil {
 		return fmt.Errorf("failed to export introspectable: %w", err)
 	}
 
 	// Request the service name
-	reply, err := s.conn.RequestName(ServiceName, dbus.NameFlagDoNotQueue)
+	reply, err := conn.RequestName(ServiceName, dbus.NameFlagDoNotQueue)
 	if err != nil {
 		return fmt.Errorf("failed to request name: %w", err)
 	}
@@ -145,25 +171,71 @@ func (s *Server) Start() error {
 		return fmt.Errorf("name %s already taken", ServiceName)
 	}
 
+	// Store connection with mutex protection
+	s.connMu.Lock()
+	s.conn = conn
+	s.connMu.Unlock()
+
+	success = true
 	log.Info().Str("service", ServiceName).Msg("D-Bus service started")
 	return nil
 }
 
 // Stop disconnects from the session bus.
 func (s *Server) Stop() error {
-	if s.conn != nil {
-		return s.conn.Close()
+	s.connMu.Lock()
+	conn := s.conn
+	s.conn = nil
+	s.connMu.Unlock()
+
+	if conn != nil {
+		return conn.Close()
 	}
 	return nil
 }
 
+// SetDeviceErrorHandler sets the callback invoked when device errors are detected.
+// This is typically used to trigger recovery actions like re-enumerating displays
+// when a device is found to be disconnected during brightness operations.
+//
+// This method is thread-safe and can be called at any time.
+func (s *Server) SetDeviceErrorHandler(handler DeviceErrorHandler) {
+	s.handlerMu.Lock()
+	defer s.handlerMu.Unlock()
+	s.deviceErrorHandler = handler
+}
+
+// handleDeviceError checks if the error indicates a disconnected device and triggers recovery.
+// Returns true if the error was a device error and recovery was triggered.
+func (s *Server) handleDeviceError(serial string, err error) bool {
+	if err == nil || !hid.IsDeviceGoneError(err) {
+		return false
+	}
+
+	log.Warn().
+		Err(err).
+		Str("serial", serial).
+		Msg("Device error detected, triggering recovery")
+
+	s.handlerMu.RLock()
+	handler := s.deviceErrorHandler
+	s.handlerMu.RUnlock()
+
+	if handler != nil {
+		// Run recovery asynchronously to not block the D-Bus response
+		go handler(serial, err)
+	}
+
+	return true
+}
+
 // ListDisplays returns a list of all connected displays.
-// Returns an array of tuples: [(serial, productName), ...]
-func (s *Server) ListDisplays() ([][2]string, *dbus.Error) {
+// Returns an array of structs: [{Serial, ProductName}, ...]
+func (s *Server) ListDisplays() ([]DisplayInfo, *dbus.Error) {
 	displays := s.manager.ListDisplays()
-	result := make([][2]string, len(displays))
+	result := make([]DisplayInfo, len(displays))
 	for i, d := range displays {
-		result[i] = [2]string{d.Serial, d.Product}
+		result[i] = DisplayInfo{Serial: d.Serial, ProductName: d.Product}
 	}
 
 	log.Debug().Int("count", len(result)).Msg("Listed displays")
@@ -184,6 +256,7 @@ func (s *Server) GetBrightness(serial string) (uint32, *dbus.Error) {
 
 	brightness, err := display.GetBrightness()
 	if err != nil {
+		s.handleDeviceError(serial, err)
 		log.Error().Err(err).Str("serial", serial).Msg("Failed to get brightness")
 		return 0, dbus.MakeFailedError(err)
 	}
@@ -215,6 +288,7 @@ func (s *Server) SetBrightness(serial string, brightness uint32) *dbus.Error {
 
 	err = display.SetBrightness(uint8(brightness))
 	if err != nil {
+		s.handleDeviceError(serial, err)
 		log.Error().Err(err).Str("serial", serial).Msg("Failed to set brightness")
 		return dbus.MakeFailedError(err)
 	}
@@ -228,6 +302,7 @@ func (s *Server) SetBrightness(serial string, brightness uint32) *dbus.Error {
 }
 
 // IncreaseBrightness increases the brightness of a display by a step.
+// The step parameter must be between 1 and 100.
 func (s *Server) IncreaseBrightness(serial string, step uint32) *dbus.Error {
 	if !s.rateLimiter.Allow() {
 		log.Warn().Msg("Rate limit exceeded for IncreaseBrightness")
@@ -238,6 +313,10 @@ func (s *Server) IncreaseBrightness(serial string, step uint32) *dbus.Error {
 		return dbus.MakeFailedError(ErrEmptySerial)
 	}
 
+	if step == 0 || step > 100 {
+		return dbus.MakeFailedError(ErrInvalidStep)
+	}
+
 	display, err := s.manager.GetDisplay(serial)
 	if err != nil {
 		return dbus.MakeFailedError(err)
@@ -245,6 +324,7 @@ func (s *Server) IncreaseBrightness(serial string, step uint32) *dbus.Error {
 
 	current, err := display.GetBrightness()
 	if err != nil {
+		s.handleDeviceError(serial, err)
 		return dbus.MakeFailedError(err)
 	}
 
@@ -255,6 +335,7 @@ func (s *Server) IncreaseBrightness(serial string, step uint32) *dbus.Error {
 
 	err = display.SetBrightness(uint8(newBrightness))
 	if err != nil {
+		s.handleDeviceError(serial, err)
 		return dbus.MakeFailedError(err)
 	}
 
@@ -265,6 +346,7 @@ func (s *Server) IncreaseBrightness(serial string, step uint32) *dbus.Error {
 }
 
 // DecreaseBrightness decreases the brightness of a display by a step.
+// The step parameter must be between 1 and 100.
 func (s *Server) DecreaseBrightness(serial string, step uint32) *dbus.Error {
 	if !s.rateLimiter.Allow() {
 		log.Warn().Msg("Rate limit exceeded for DecreaseBrightness")
@@ -275,6 +357,10 @@ func (s *Server) DecreaseBrightness(serial string, step uint32) *dbus.Error {
 		return dbus.MakeFailedError(ErrEmptySerial)
 	}
 
+	if step == 0 || step > 100 {
+		return dbus.MakeFailedError(ErrInvalidStep)
+	}
+
 	display, err := s.manager.GetDisplay(serial)
 	if err != nil {
 		return dbus.MakeFailedError(err)
@@ -282,6 +368,7 @@ func (s *Server) DecreaseBrightness(serial string, step uint32) *dbus.Error {
 
 	current, err := display.GetBrightness()
 	if err != nil {
+		s.handleDeviceError(serial, err)
 		return dbus.MakeFailedError(err)
 	}
 
@@ -294,6 +381,7 @@ func (s *Server) DecreaseBrightness(serial string, step uint32) *dbus.Error {
 
 	err = display.SetBrightness(uint8(newBrightness))
 	if err != nil {
+		s.handleDeviceError(serial, err)
 		return dbus.MakeFailedError(err)
 	}
 
@@ -324,6 +412,7 @@ func (s *Server) SetAllBrightness(brightness uint32) *dbus.Error {
 
 		err = display.SetBrightness(uint8(brightness))
 		if err != nil {
+			s.handleDeviceError(info.Serial, err)
 			log.Error().Err(err).Str("serial", info.Serial).Msg("Failed to set brightness")
 			continue
 		}

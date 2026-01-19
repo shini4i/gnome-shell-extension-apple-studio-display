@@ -469,6 +469,44 @@ func TestMonitor_RemoveEventDebouncing(t *testing.T) {
 	mu.Unlock()
 }
 
+func TestMonitor_RemoveEventDebouncing_AfterWindowExpires(t *testing.T) {
+	var mu sync.Mutex
+	callCount := 0
+
+	handler := func(event Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		callCount++
+	}
+
+	monitor := NewMonitor(handler)
+	product := "5ac/1114/157"
+
+	// First REMOVE event should trigger handler
+	uevent := netlink.UEvent{
+		Action: netlink.REMOVE,
+		KObj:   "/devices/pci0000:00/usb1/1-1",
+		Env: map[string]string{
+			"PRODUCT": product,
+		},
+	}
+	monitor.handleEvent(uevent)
+
+	mu.Lock()
+	assert.Equal(t, 1, callCount, "first REMOVE should trigger handler")
+	mu.Unlock()
+
+	// Wait for debounce window to expire plus a small margin
+	time.Sleep(removeEventDebounce + 50*time.Millisecond)
+
+	// Second REMOVE with same PRODUCT after debounce window should trigger handler again
+	monitor.handleEvent(uevent)
+
+	mu.Lock()
+	assert.Equal(t, 2, callCount, "REMOVE after debounce window expires should trigger handler again")
+	mu.Unlock()
+}
+
 func TestMonitor_RemoveEventDebouncing_DifferentProducts(t *testing.T) {
 	var mu sync.Mutex
 	callCount := 0

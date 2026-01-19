@@ -329,10 +329,21 @@ export class AsdDaemon {
 
     /**
      * Disconnects D-Bus signal handlers.
+     *
+     * Handles edge cases where the proxy may be in an invalid state (e.g., the
+     * D-Bus connection was lost). Signal disconnection errors are logged but
+     * don't prevent cleanup from completing.
      */
     _disconnectSignals() {
         if (this._proxy && this._signalIds.length > 0) {
-            this._signalIds.forEach(id => this._proxy.disconnectSignal(id));
+            this._signalIds.forEach(id => {
+                try {
+                    this._proxy.disconnectSignal(id);
+                } catch (e) {
+                    // Signal may already be disconnected or proxy in bad state
+                    console.debug(`[AsdBrightness] Failed to disconnect signal ${id}: ${e.message}`);
+                }
+            });
         }
         this._signalIds = [];
     }

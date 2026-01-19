@@ -69,6 +69,8 @@ export class AsdDaemon {
         this._signalIds = [];
         this._nameWatcherId = 0;
         this._isReconnecting = false;
+        this._login1Proxy = null;
+        this._login1SignalId = 0;
         this._callbacks = {
             displayAdded: [],
             displayRemoved: [],
@@ -86,6 +88,9 @@ export class AsdDaemon {
     async init() {
         // Set up name watcher to detect daemon restarts
         this._setupNameWatcher();
+
+        // Set up suspend/resume detection to refresh on wake
+        this._setupSuspendWatcher();
 
         // Try initial connection
         return await this._connect();
@@ -108,6 +113,74 @@ export class AsdDaemon {
         );
 
         console.log('[AsdBrightness] Name watcher set up for daemon');
+    }
+
+    /**
+     * Sets up the suspend/resume watcher using systemd-logind.
+     *
+     * Subscribes to PrepareForSleep signal from org.freedesktop.login1
+     * to detect system suspend/resume events. On resume, triggers a
+     * display refresh to recover from stale USB device handles.
+     *
+     * Uses async D-Bus proxy creation to avoid blocking the GNOME Shell main loop.
+     */
+    async _setupSuspendWatcher() {
+        if (this._login1Proxy !== null) {
+            return;
+        }
+
+        try {
+            this._login1Proxy = await new Promise((resolve, reject) => {
+                Gio.DBusProxy.new_for_bus(
+                    Gio.BusType.SYSTEM,
+                    Gio.DBusProxyFlags.NONE,
+                    null,
+                    'org.freedesktop.login1',
+                    '/org/freedesktop/login1',
+                    'org.freedesktop.login1.Manager',
+                    null,
+                    (sourceObject, res) => {
+                        try {
+                            const proxy = Gio.DBusProxy.new_for_bus_finish(res);
+                            resolve(proxy);
+                        } catch (e) {
+                            reject(e);
+                        }
+                    }
+                );
+            });
+
+            // Guard against destruction during async operation
+            if (this._callbacks === null) {
+                this._login1Proxy = null;
+                return;
+            }
+
+            this._login1SignalId = this._login1Proxy.connect('g-signal',
+                (proxy, senderName, signalName, parameters) => {
+                    try {
+                        if (signalName === 'PrepareForSleep') {
+                            const [goingToSleep] = parameters.deep_unpack();
+                            if (!goingToSleep) {
+                                // System is waking up - trigger refresh
+                                console.log('[AsdBrightness] System resumed from sleep, triggering display refresh');
+                                // Guard against destroyed state
+                                if (this._callbacks !== null && this._proxy !== null) {
+                                    this._callbacks.daemonAvailable.forEach(cb => cb());
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        console.warn(`[AsdBrightness] Error handling login1 signal: ${e.message}`);
+                    }
+                }
+            );
+
+            console.log('[AsdBrightness] Suspend watcher set up');
+        } catch (e) {
+            // Non-fatal: suspend detection is optional functionality
+            console.warn(`[AsdBrightness] Failed to set up suspend watcher: ${e.message}`);
+        }
     }
 
     /**
@@ -274,6 +347,15 @@ export class AsdDaemon {
             this._nameWatcherId = 0;
         }
 
+        // Clean up suspend watcher
+        if (this._login1Proxy !== null) {
+            if (this._login1SignalId !== 0) {
+                this._login1Proxy.disconnect(this._login1SignalId);
+                this._login1SignalId = 0;
+            }
+            this._login1Proxy = null;
+        }
+
         // Disconnect signals and clean up proxy
         this._disconnectSignals();
         this._proxy = null;
@@ -297,6 +379,7 @@ export class AsdDaemon {
     onDisplayAdded(callback) {
         this._callbacks.displayAdded.push(callback);
         return () => {
+            if (!this._callbacks) return;
             const idx = this._callbacks.displayAdded.indexOf(callback);
             if (idx !== -1)
                 this._callbacks.displayAdded.splice(idx, 1);
@@ -312,6 +395,7 @@ export class AsdDaemon {
     onDisplayRemoved(callback) {
         this._callbacks.displayRemoved.push(callback);
         return () => {
+            if (!this._callbacks) return;
             const idx = this._callbacks.displayRemoved.indexOf(callback);
             if (idx !== -1)
                 this._callbacks.displayRemoved.splice(idx, 1);
@@ -327,6 +411,7 @@ export class AsdDaemon {
     onBrightnessChanged(callback) {
         this._callbacks.brightnessChanged.push(callback);
         return () => {
+            if (!this._callbacks) return;
             const idx = this._callbacks.brightnessChanged.indexOf(callback);
             if (idx !== -1)
                 this._callbacks.brightnessChanged.splice(idx, 1);
@@ -343,6 +428,7 @@ export class AsdDaemon {
     onDaemonAvailable(callback) {
         this._callbacks.daemonAvailable.push(callback);
         return () => {
+            if (!this._callbacks) return;
             const idx = this._callbacks.daemonAvailable.indexOf(callback);
             if (idx !== -1)
                 this._callbacks.daemonAvailable.splice(idx, 1);
@@ -359,6 +445,7 @@ export class AsdDaemon {
     onDaemonUnavailable(callback) {
         this._callbacks.daemonUnavailable.push(callback);
         return () => {
+            if (!this._callbacks) return;
             const idx = this._callbacks.daemonUnavailable.indexOf(callback);
             if (idx !== -1)
                 this._callbacks.daemonUnavailable.splice(idx, 1);

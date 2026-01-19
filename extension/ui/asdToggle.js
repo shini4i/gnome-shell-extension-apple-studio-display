@@ -34,6 +34,9 @@ export const AsdToggle = GObject.registerClass({
 
         this._daemon = daemon;
         this._displayItems = new Map(); // Map<serial, {item, signalId}>
+        this._pendingAdds = new Set(); // Track serials being added (prevents race conditions)
+        this._refreshVersion = 0; // Version counter for refresh operations
+        this._isRefreshing = false; // Flag to prevent concurrent refreshes
         this._noDisplaysItem = null;
         this._daemonDisconnects = [];
 
@@ -108,60 +111,103 @@ export const AsdToggle = GObject.registerClass({
 
     /**
      * Refreshes the list of connected displays from the daemon.
+     *
+     * Uses version tracking to prevent race conditions:
+     * - Only one refresh can run at a time
+     * - If a newer refresh starts, older ones abort gracefully
+     * - Incoming D-Bus signals during refresh don't corrupt state
      */
     async _refreshDisplays() {
-        const displays = await this._daemon.listDisplays();
-
-        // Guard against destruction during await
-        if (!this._displayItems) {
+        // Prevent concurrent refreshes
+        if (this._isRefreshing) {
             return;
         }
 
-        // Clear existing items with proper signal disconnection
-        this._displayItems.forEach(({item, signalId}, _serial) => {
-            item.disconnect(signalId);
-            item.destroy();
-        });
-        this._displayItems.clear();
+        this._isRefreshing = true;
+        const currentVersion = ++this._refreshVersion;
 
-        // Add items for each display
-        for (const display of displays) {
-            await this._addDisplayItem(display.serial, display.productName);
+        try {
+            const displays = await this._daemon.listDisplays();
+
+            // Abort if superseded by newer refresh or destroyed
+            if (!this._displayItems || this._refreshVersion !== currentVersion) {
+                return;
+            }
+
+            // Clear existing items with proper signal disconnection
+            this._displayItems.forEach(({item, signalId}, _serial) => {
+                item.disconnect(signalId);
+                item.destroy();
+            });
+            this._displayItems.clear();
+            this._pendingAdds?.clear();
+
+            // Add items for each display
+            for (const display of displays) {
+                // Check version before each async add to abort if superseded
+                if (this._refreshVersion !== currentVersion) {
+                    return;
+                }
+                await this._addDisplayItem(display.serial, display.productName);
+            }
+
+            // Final version check before updating visibility
+            if (this._refreshVersion === currentVersion) {
+                this._updateVisibility();
+            }
+        } finally {
+            // Only clear the flag if no newer refresh has started.
+            // A newer refresh would have incremented _refreshVersion and set its own flag.
+            if (this._refreshVersion === currentVersion) {
+                this._isRefreshing = false;
+            }
         }
-
-        this._updateVisibility();
     }
 
     /**
      * Adds a display control item to the menu.
      *
+     * Guards against race conditions by tracking in-flight additions.
+     * If the same serial is already being added or exists in the map,
+     * the call is silently ignored.
+     *
      * @param {string} serial - Display serial number
      * @param {string} productName - Display product name
      */
     async _addDisplayItem(serial, productName) {
-        if (!this._displayItems || this._displayItems.has(serial)) {
+        // Guard against concurrent adds for the same serial (race condition fix)
+        // Also guard against destroyed state where _pendingAdds is null
+        if (!this._displayItems || !this._pendingAdds || this._displayItems.has(serial) || this._pendingAdds.has(serial)) {
             return;
         }
 
-        // Pass null to DisplayControlItem if fetch fails - it will show error state
-        const brightness = await this._daemon.getBrightness(serial);
+        // Mark this serial as being added to prevent concurrent additions
+        this._pendingAdds.add(serial);
 
-        // Guard against destruction during await
-        if (!this._displayItems) {
-            return;
+        try {
+            // Pass null to DisplayControlItem if fetch fails - it will show error state
+            const brightness = await this._daemon.getBrightness(serial);
+
+            // Guard against destruction during await or if already added by another call
+            if (!this._displayItems || this._displayItems.has(serial)) {
+                return;
+            }
+
+            const item = new DisplayControlItem(serial, productName, brightness);
+            const signalId = item.connect('brightness-changed', (_item, value) => {
+                this._daemon.setBrightness(serial, value);
+            });
+
+            // Insert before the "no displays" placeholder
+            const position = this.menu.numMenuItems - 1;
+            this.menu.addMenuItem(item, position);
+            this._displayItems.set(serial, {item, signalId});
+
+            this._updateVisibility();
+        } finally {
+            // Always remove from pending set, even on error
+            this._pendingAdds?.delete(serial);
         }
-
-        const item = new DisplayControlItem(serial, productName, brightness);
-        const signalId = item.connect('brightness-changed', (_item, value) => {
-            this._daemon.setBrightness(serial, value);
-        });
-
-        // Insert before the "no displays" placeholder
-        const position = this.menu.numMenuItems - 1;
-        this.menu.addMenuItem(item, position);
-        this._displayItems.set(serial, {item, signalId});
-
-        this._updateVisibility();
     }
 
     /**
@@ -170,6 +216,11 @@ export const AsdToggle = GObject.registerClass({
      * @param {string} serial - Display serial number
      */
     _removeDisplayItem(serial) {
+        // Guard against destruction
+        if (!this._displayItems) {
+            return;
+        }
+
         const entry = this._displayItems.get(serial);
         if (entry) {
             entry.item.disconnect(entry.signalId);
@@ -222,6 +273,11 @@ export const AsdToggle = GObject.registerClass({
      * @param {number} brightness - New brightness value
      */
     _onBrightnessChanged(serial, brightness) {
+        // Guard against destruction
+        if (!this._displayItems) {
+            return;
+        }
+
         const entry = this._displayItems.get(serial);
         if (entry) {
             entry.item.updateBrightness(brightness);
@@ -232,6 +288,10 @@ export const AsdToggle = GObject.registerClass({
      * Cleans up resources.
      */
     destroy() {
+        // Invalidate any in-flight refresh operations by incrementing version
+        this._refreshVersion++;
+        this._isRefreshing = false;
+
         // Disconnect daemon callbacks
         this._daemonDisconnects.forEach(disconnect => disconnect());
         this._daemonDisconnects = [];
@@ -245,6 +305,10 @@ export const AsdToggle = GObject.registerClass({
             this._displayItems.clear();
             this._displayItems = null;
         }
+
+        // Clean up race condition prevention state
+        this._pendingAdds?.clear();
+        this._pendingAdds = null;
 
         this._noDisplaysItem = null;
 

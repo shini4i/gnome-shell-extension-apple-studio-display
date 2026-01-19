@@ -37,6 +37,7 @@ export const AsdToggle = GObject.registerClass({
         this._pendingAdds = new Set(); // Track serials being added (prevents race conditions)
         this._refreshVersion = 0; // Version counter for refresh operations
         this._isRefreshing = false; // Flag to prevent concurrent refreshes
+        this._refreshQueued = false; // Flag to queue refresh when signals arrive during in-flight refresh
         this._noDisplaysItem = null;
         this._daemonDisconnects = [];
 
@@ -116,6 +117,8 @@ export const AsdToggle = GObject.registerClass({
      * - Only one refresh can run at a time
      * - If a newer refresh starts, older ones abort gracefully
      * - Incoming D-Bus signals during refresh don't corrupt state
+     * - If signals arrive during an in-flight refresh, a follow-up refresh
+     *   is automatically triggered to apply them
      */
     async _refreshDisplays() {
         // Prevent concurrent refreshes
@@ -160,6 +163,12 @@ export const AsdToggle = GObject.registerClass({
             // A newer refresh would have incremented _refreshVersion and set its own flag.
             if (this._refreshVersion === currentVersion) {
                 this._isRefreshing = false;
+
+                // If signals arrived during the refresh, start another refresh to apply them
+                if (this._refreshQueued) {
+                    this._refreshQueued = false;
+                    this._refreshDisplays();
+                }
             }
         }
     }
@@ -250,19 +259,33 @@ export const AsdToggle = GObject.registerClass({
     /**
      * Handles DisplayAdded D-Bus signal.
      *
+     * If a refresh is in progress, queues another refresh to pick up
+     * the new display after the current refresh completes.
+     *
      * @param {string} serial - Display serial number
      * @param {string} productName - Display product name
      */
     _onDisplayAdded(serial, productName) {
+        if (this._isRefreshing) {
+            this._refreshQueued = true;
+            return;
+        }
         this._addDisplayItem(serial, productName);
     }
 
     /**
      * Handles DisplayRemoved D-Bus signal.
      *
+     * If a refresh is in progress, queues another refresh to apply
+     * the removal after the current refresh completes.
+     *
      * @param {string} serial - Display serial number
      */
     _onDisplayRemoved(serial) {
+        if (this._isRefreshing) {
+            this._refreshQueued = true;
+            return;
+        }
         this._removeDisplayItem(serial);
     }
 
@@ -291,6 +314,7 @@ export const AsdToggle = GObject.registerClass({
         // Invalidate any in-flight refresh operations by incrementing version
         this._refreshVersion++;
         this._isRefreshing = false;
+        this._refreshQueued = false;
 
         // Disconnect daemon callbacks
         this._daemonDisconnects.forEach(disconnect => disconnect());

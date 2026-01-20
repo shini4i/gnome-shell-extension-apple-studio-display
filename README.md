@@ -16,6 +16,8 @@ A GNOME Shell extension that integrates Apple Studio Display brightness controls
 - **D-Bus Integration**: Daemon provides a session bus service for brightness control
 - **GNOME 47+ Support**: Built for modern GNOME Shell (47, 48, 49)
 
+<br clear="right"/>
+
 ## Architecture
 
 ```mermaid

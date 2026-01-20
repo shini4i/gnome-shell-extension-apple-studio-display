@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/pilebones/go-udev/netlink"
 	"github.com/rs/zerolog/log"
@@ -19,6 +20,13 @@ const (
 	// A larger buffer prevents ENOBUFS errors during USB hot-plug events.
 	// USB hot-plug generates many netlink messages rapidly; 2MB handles typical scenarios.
 	netlinkBufferSize = 2 * 1024 * 1024 // 2 MB
+
+	// removeEventDebounce is the time window during which duplicate REMOVE events
+	// for the same device are ignored. When a Studio Display disconnects, the kernel
+	// sends REMOVE events for each USB interface (HID, camera, etc.), not just the
+	// main device. We debounce these to prevent flooding the system with redundant
+	// disconnect notifications.
+	removeEventDebounce = 500 * time.Millisecond
 )
 
 const (
@@ -65,12 +73,17 @@ type Monitor struct {
 	quit            chan struct{}
 	stopped         bool
 	mu              sync.Mutex
+
+	// lastRemoveTime tracks when we last processed a REMOVE event for each PRODUCT.
+	// This is used for debouncing duplicate REMOVE events from USB interfaces.
+	lastRemoveTime map[string]time.Time
 }
 
 // NewMonitor creates a new udev monitor with the given event handler.
 func NewMonitor(handler EventHandler) *Monitor {
 	return &Monitor{
-		handler: handler,
+		handler:        handler,
+		lastRemoveTime: make(map[string]time.Time),
 	}
 }
 
@@ -248,28 +261,43 @@ func isBufferOverflowError(err error) bool {
 
 // handleEvent processes a single udev event.
 func (m *Monitor) handleEvent(uevent netlink.UEvent) {
+	product := uevent.Env["PRODUCT"]
+	devtype := uevent.Env["DEVTYPE"]
+
 	// Filter for usb_device type only (not usb_interface) on ADD events.
 	// For REMOVE events, DEVTYPE may not be present since the device is already gone,
-	// so we skip this check. The matcher already ensures we only receive Studio Display events.
-	devtype := uevent.Env["DEVTYPE"]
+	// so we use debouncing instead to filter duplicate events from USB interfaces.
 	if uevent.Action == netlink.ADD && devtype != "usb_device" {
 		return
+	}
+
+	// Debounce REMOVE events to prevent processing multiple events from USB interfaces.
+	// When a device disconnects, we receive REMOVE events for each USB interface
+	// (HID, camera, etc.). We only want to process the first one.
+	if uevent.Action == netlink.REMOVE {
+		if m.shouldDebounceRemove(product) {
+			log.Debug().
+				Str("product", product).
+				Str("devpath", uevent.KObj).
+				Msg("Ignoring duplicate REMOVE event (debounced)")
+			return
+		}
 	}
 
 	log.Debug().
 		Str("action", string(uevent.Action)).
 		Str("devpath", uevent.KObj).
-		Str("product", uevent.Env["PRODUCT"]).
+		Str("product", product).
 		Msg("USB device event")
 
 	var eventType EventType
 	switch uevent.Action {
 	case netlink.ADD:
 		eventType = EventAdd
-		log.Info().Str("product", uevent.Env["PRODUCT"]).Msg("Apple Studio Display connected")
+		log.Info().Str("product", product).Msg("Apple Studio Display connected")
 	case netlink.REMOVE:
 		eventType = EventRemove
-		log.Info().Str("product", uevent.Env["PRODUCT"]).Msg("Apple Studio Display disconnected")
+		log.Info().Str("product", product).Msg("Apple Studio Display disconnected")
 	default:
 		return
 	}
@@ -277,4 +305,34 @@ func (m *Monitor) handleEvent(uevent netlink.UEvent) {
 	if m.handler != nil {
 		m.handler(Event{Type: eventType})
 	}
+}
+
+// shouldDebounceRemove checks if a REMOVE event for the given product should be
+// ignored due to debouncing. Returns true if the event should be debounced.
+// Also cleans up stale entries to prevent memory leaks.
+func (m *Monitor) shouldDebounceRemove(product string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now()
+
+	// Check if we should debounce this event
+	if lastTime, exists := m.lastRemoveTime[product]; exists {
+		if now.Sub(lastTime) < removeEventDebounce {
+			return true
+		}
+	}
+
+	// Update the last remove time for this product
+	m.lastRemoveTime[product] = now
+
+	// Periodically clean up stale entries to prevent memory leaks.
+	// We do this inline since the map is expected to be very small (typically 1-2 entries).
+	for key, t := range m.lastRemoveTime {
+		if now.Sub(t) > time.Minute {
+			delete(m.lastRemoveTime, key)
+		}
+	}
+
+	return false
 }

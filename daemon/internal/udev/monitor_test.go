@@ -7,6 +7,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/pilebones/go-udev/netlink"
 	"github.com/stretchr/testify/assert"
@@ -422,4 +423,196 @@ func TestIsBufferOverflowError(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+func TestMonitor_RemoveEventDebouncing(t *testing.T) {
+	var mu sync.Mutex
+	callCount := 0
+
+	handler := func(event Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		callCount++
+	}
+
+	monitor := NewMonitor(handler)
+	product := "5ac/1114/157"
+
+	// First REMOVE event should trigger handler
+	uevent := netlink.UEvent{
+		Action: netlink.REMOVE,
+		KObj:   "/devices/pci0000:00/usb1/1-1",
+		Env: map[string]string{
+			"PRODUCT": product,
+		},
+	}
+	monitor.handleEvent(uevent)
+
+	mu.Lock()
+	assert.Equal(t, 1, callCount, "first REMOVE should trigger handler")
+	mu.Unlock()
+
+	// Second REMOVE with same PRODUCT within debounce window should be ignored
+	uevent.KObj = "/devices/pci0000:00/usb1/1-1/1-1:1.0" // Different interface
+	monitor.handleEvent(uevent)
+
+	mu.Lock()
+	assert.Equal(t, 1, callCount, "second REMOVE within debounce window should be ignored")
+	mu.Unlock()
+
+	// Third REMOVE with same PRODUCT within debounce window should also be ignored
+	uevent.KObj = "/devices/pci0000:00/usb1/1-1/1-1:1.1"
+	monitor.handleEvent(uevent)
+
+	mu.Lock()
+	assert.Equal(t, 1, callCount, "third REMOVE within debounce window should be ignored")
+	mu.Unlock()
+}
+
+func TestMonitor_RemoveEventDebouncing_AfterWindowExpires(t *testing.T) {
+	var mu sync.Mutex
+	callCount := 0
+
+	handler := func(event Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		callCount++
+	}
+
+	monitor := NewMonitor(handler)
+	product := "5ac/1114/157"
+
+	// First REMOVE event should trigger handler
+	uevent := netlink.UEvent{
+		Action: netlink.REMOVE,
+		KObj:   "/devices/pci0000:00/usb1/1-1",
+		Env: map[string]string{
+			"PRODUCT": product,
+		},
+	}
+	monitor.handleEvent(uevent)
+
+	mu.Lock()
+	assert.Equal(t, 1, callCount, "first REMOVE should trigger handler")
+	mu.Unlock()
+
+	// Wait for debounce window to expire plus a small margin
+	time.Sleep(removeEventDebounce + 50*time.Millisecond)
+
+	// Second REMOVE with same PRODUCT after debounce window should trigger handler again
+	monitor.handleEvent(uevent)
+
+	mu.Lock()
+	assert.Equal(t, 2, callCount, "REMOVE after debounce window expires should trigger handler again")
+	mu.Unlock()
+}
+
+func TestMonitor_RemoveEventDebouncing_DifferentProducts(t *testing.T) {
+	var mu sync.Mutex
+	callCount := 0
+
+	handler := func(event Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		callCount++
+	}
+
+	monitor := NewMonitor(handler)
+
+	// First REMOVE for product A
+	uevent1 := netlink.UEvent{
+		Action: netlink.REMOVE,
+		KObj:   "/devices/pci0000:00/usb1/1-1",
+		Env: map[string]string{
+			"PRODUCT": "5ac/1114/157",
+		},
+	}
+	monitor.handleEvent(uevent1)
+
+	// First REMOVE for product B (different device, e.g., second monitor)
+	uevent2 := netlink.UEvent{
+		Action: netlink.REMOVE,
+		KObj:   "/devices/pci0000:00/usb1/1-2",
+		Env: map[string]string{
+			"PRODUCT": "5ac/1114/201", // Different bcdDevice
+		},
+	}
+	monitor.handleEvent(uevent2)
+
+	mu.Lock()
+	assert.Equal(t, 2, callCount, "REMOVE events for different products should both trigger handler")
+	mu.Unlock()
+}
+
+func TestMonitor_ShouldDebounceRemove(t *testing.T) {
+	monitor := NewMonitor(nil)
+	product := "5ac/1114/157"
+
+	// First call should not debounce
+	shouldDebounce := monitor.shouldDebounceRemove(product)
+	assert.False(t, shouldDebounce, "first call should not debounce")
+
+	// Immediate second call should debounce
+	shouldDebounce = monitor.shouldDebounceRemove(product)
+	assert.True(t, shouldDebounce, "immediate second call should debounce")
+
+	// Verify the timestamp was recorded
+	monitor.mu.Lock()
+	_, exists := monitor.lastRemoveTime[product]
+	monitor.mu.Unlock()
+	assert.True(t, exists, "product should be in lastRemoveTime map")
+}
+
+func TestMonitor_ShouldDebounceRemove_Cleanup(t *testing.T) {
+	monitor := NewMonitor(nil)
+
+	// Add an old entry manually
+	oldProduct := "old/product/1"
+	monitor.mu.Lock()
+	monitor.lastRemoveTime[oldProduct] = time.Now().Add(-2 * time.Minute) // 2 minutes ago
+	monitor.mu.Unlock()
+
+	// Process a new product - this should trigger cleanup of the old entry
+	newProduct := "new/product/1"
+	monitor.shouldDebounceRemove(newProduct)
+
+	// Verify old entry was cleaned up
+	monitor.mu.Lock()
+	_, oldExists := monitor.lastRemoveTime[oldProduct]
+	_, newExists := monitor.lastRemoveTime[newProduct]
+	monitor.mu.Unlock()
+
+	assert.False(t, oldExists, "old entry should be cleaned up")
+	assert.True(t, newExists, "new entry should exist")
+}
+
+func TestMonitor_AddEventsNotDebounced(t *testing.T) {
+	var mu sync.Mutex
+	callCount := 0
+
+	handler := func(event Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		callCount++
+	}
+
+	monitor := NewMonitor(handler)
+
+	// Multiple ADD events should all trigger handler (no debouncing for ADD)
+	uevent := netlink.UEvent{
+		Action: netlink.ADD,
+		KObj:   "/devices/pci0000:00/usb1/1-1",
+		Env: map[string]string{
+			"DEVTYPE": "usb_device",
+			"PRODUCT": "5ac/1114/157",
+		},
+	}
+
+	monitor.handleEvent(uevent)
+	monitor.handleEvent(uevent)
+	monitor.handleEvent(uevent)
+
+	mu.Lock()
+	assert.Equal(t, 3, callCount, "ADD events should not be debounced")
+	mu.Unlock()
 }

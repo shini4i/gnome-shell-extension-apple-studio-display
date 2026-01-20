@@ -7,11 +7,9 @@
 
 A GNOME Shell extension that integrates Apple Studio Display brightness controls into the Quick Settings panel.
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/shini4i/assets/main/src/gnome-shell-extension-apple-studio-display/demo.png" alt="Demo" width="400">
-</p>
-
 ## Features
+
+<img align="right" src="https://raw.githubusercontent.com/shini4i/assets/main/src/gnome-shell-extension-apple-studio-display/demo.png" alt="Demo" width="300">
 
 - **Per-Display Controls**: Individual brightness sliders for each connected display
 - **Hot-Plug Support**: Automatically detects display connect/disconnect via udev

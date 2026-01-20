@@ -9,10 +9,14 @@ A GNOME Shell extension that integrates Apple Studio Display brightness controls
 
 ## Features
 
+<img align="right" src="https://raw.githubusercontent.com/shini4i/assets/main/src/gnome-shell-extension-apple-studio-display/demo.png" alt="Demo" width="300">
+
 - **Per-Display Controls**: Individual brightness sliders for each connected display
 - **Hot-Plug Support**: Automatically detects display connect/disconnect via udev
 - **D-Bus Integration**: Daemon provides a session bus service for brightness control
 - **GNOME 47+ Support**: Built for modern GNOME Shell (47, 48, 49)
+
+<br clear="right"/>
 
 ## Architecture
 

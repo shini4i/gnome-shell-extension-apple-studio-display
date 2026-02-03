@@ -1,10 +1,5 @@
 # Apple Studio Display Brightness Control for GNOME
 
-> [!WARNING]
-> **This is a Proof of Concept and is not yet ready for general use.**
->
-> The project is under active development. Features may be incomplete, broken, or change without notice.
-
 A GNOME Shell extension that integrates Apple Studio Display brightness controls into the Quick Settings panel.
 
 ## Features
